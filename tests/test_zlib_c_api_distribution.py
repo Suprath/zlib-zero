@@ -39,9 +39,20 @@ def run_c_api_distribution_tests():
     crc_cpp = ROOT_DIR / "modernized" / "modernized_zlib_crc32.cpp"
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        so_file = Path(tmpdir) / "libz_neuralbinary.dylib"
-        cmd = ["clang++", "-std=c++20", "-march=armv8-a+crc", "-shared", "-fPIC", "-O3",
-               str(c_api_cpp), str(adler_cpp), str(crc_cpp), "-o", str(so_file)]
+        import platform, shutil
+        compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+        arch_flags = []
+        machine = platform.machine().lower()
+        if "arm" in machine or "aarch64" in machine:
+            if sys.platform == "linux":
+                arch_flags = ["-march=armv8-a+crc"]
+            elif sys.platform == "darwin":
+                arch_flags = ["-arch", "arm64"]
+        elif "x86" in machine or "amd64" in machine:
+            arch_flags = ["-march=native"]
+
+        cmd = [compiler, "-std=c++20", *arch_flags, "-shared", "-fPIC", "-O3",
+               str(c_api_cpp), str(adler_cpp), str(crc_cpp), str(ROOT_DIR / "modernized" / "modernized_zlib_deflate.cpp"), "-o", str(so_file)]
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         mod_lib = ctypes.CDLL(str(so_file))

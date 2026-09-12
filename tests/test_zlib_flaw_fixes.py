@@ -45,8 +45,20 @@ def run_flaw_fix_verification():
         with open(src_cpp, "w") as f:
             f.write(cpp_code)
 
+        import platform, shutil
+        compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+        arch_flags = []
+        machine = platform.machine().lower()
+        if "arm" in machine or "aarch64" in machine:
+            if sys.platform == "linux":
+                arch_flags = ["-march=armv8-a+crc"]
+            elif sys.platform == "darwin":
+                arch_flags = ["-arch", "arm64"]
+        elif "x86" in machine or "amd64" in machine:
+            arch_flags = ["-march=native"]
+
         so_crc = Path(tmpdir) / "libmod_crc.dylib"
-        cmd = ["clang++", "-std=c++20", "-march=armv8-a+crc", "-shared", "-fPIC", "-O3", str(MODERNIZED_CRC_CPP), "-o", str(so_crc)]
+        cmd = [compiler, "-std=c++20", *arch_flags, "-shared", "-fPIC", "-O3", str(MODERNIZED_CRC_CPP), "-o", str(so_crc)]
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         mod_crc_lib = ctypes.CDLL(str(so_crc))
@@ -54,7 +66,7 @@ def run_flaw_fix_verification():
         mod_crc_lib.crc32_modernized.restype = ctypes.c_uint32
 
         so_lz77 = Path(tmpdir) / "liblz77.dylib"
-        cmd = ["clang++", "-std=c++20", "-shared", "-fPIC", "-O3", str(src_cpp), "-o", str(so_lz77)]
+        cmd = [compiler, "-std=c++20", *arch_flags, "-shared", "-fPIC", "-O3", str(src_cpp), "-o", str(so_lz77)]
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         mod_lz77_lib = ctypes.CDLL(str(so_lz77))

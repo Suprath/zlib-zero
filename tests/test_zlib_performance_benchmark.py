@@ -32,17 +32,29 @@ def run_performance_benchmarks():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Compile Adler32 with -O3 -std=c++20
+        import platform, shutil
+        compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+        arch_flags = []
+        machine = platform.machine().lower()
+        if "arm" in machine or "aarch64" in machine:
+            if sys.platform == "linux":
+                arch_flags = ["-march=armv8-a+crc"]
+            elif sys.platform == "darwin":
+                arch_flags = ["-arch", "arm64"]
+        elif "x86" in machine or "amd64" in machine:
+            arch_flags = ["-march=native"]
+
         adler_so = Path(tmpdir) / "libmod_adler.dylib"
-        cmd = ["clang++", "-std=c++20", "-shared", "-fPIC", "-O3", str(MODERNIZED_ADLER_CPP), "-o", str(adler_so)]
+        cmd = [compiler, "-std=c++20", *arch_flags, "-shared", "-fPIC", "-O3", str(MODERNIZED_ADLER_CPP), "-o", str(adler_so)]
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         mod_adler_lib = ctypes.CDLL(str(adler_so))
         mod_adler_lib.adler32_modernized.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]
         mod_adler_lib.adler32_modernized.restype = ctypes.c_uint32
 
-        # Compile CRC32 with Hardware Acceleration (-march=armv8-a+crc -O3 -std=c++20)
+        # Compile CRC32 with Hardware Acceleration
         crc_so = Path(tmpdir) / "libmod_crc.dylib"
-        cmd = ["clang++", "-std=c++20", "-march=armv8-a+crc", "-shared", "-fPIC", "-O3", str(MODERNIZED_CRC_CPP), "-o", str(crc_so)]
+        cmd = [compiler, "-std=c++20", *arch_flags, "-shared", "-fPIC", "-O3", str(MODERNIZED_CRC_CPP), "-o", str(crc_so)]
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         mod_crc_lib = ctypes.CDLL(str(crc_so))

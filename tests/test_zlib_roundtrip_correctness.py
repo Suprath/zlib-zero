@@ -27,6 +27,8 @@ import struct
 import unittest
 import subprocess
 import tempfile
+import shutil
+import platform
 
 # ---------------------------------------------------------------------------
 # Build the shared library if needed
@@ -109,10 +111,21 @@ int main(int argc, char** argv) {
 }
 """)
     
-    # Compile
+    arch_flags = []
+    machine = platform.machine().lower()
+    if "arm" in machine or "aarch64" in machine:
+        if sys.platform == "linux":
+            arch_flags = ["-march=armv8-a+crc"]
+        elif sys.platform == "darwin":
+            arch_flags = ["-arch", "arm64"]
+    elif "x86" in machine or "amd64" in machine:
+        arch_flags = ["-march=native"]
+
+    compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+
     cmd = [
-        "clang++", "-std=c++20", "-O2",
-        "-march=armv8-a+crc",
+        compiler, "-std=c++20", "-O2",
+        *arch_flags,
         f"-I{MODERNIZED_DIR}",
         driver_src,
         "-o", driver_bin,

@@ -7,11 +7,13 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Optimization & Architecture Flags
 if(MSVC)
-    add_compile_options(/O2 /arch:AVX2)
+    add_compile_options(/O2)
 else()
-    add_compile_options(-O3 -march=native)
-    if(APPLE)
+    add_compile_options(-O3)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm" AND NOT APPLE)
         add_compile_options(-march=armv8-a+crc)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|i386")
+        add_compile_options(-march=native)
     endif()
 endif()
 

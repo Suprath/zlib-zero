@@ -9,7 +9,7 @@ Concern C — Streaming compression:   bounded RAM, Z_SYNC_FLUSH, incremental ou
 Concern D — Header split:            modernized_zlib_deflate.cpp compiles cleanly
 """
 
-import os, sys, zlib, gzip, subprocess, struct, io, random, unittest, shutil, tempfile
+import os, sys, zlib, gzip, subprocess, struct, io, random, unittest, shutil, tempfile, platform
 
 PROJECT_ROOT   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODERNIZED_DIR = os.path.join(PROJECT_ROOT, "modernized")
@@ -227,6 +227,20 @@ class TestConcernC_Streaming(unittest.TestCase):
 
 class TestConcernD_HeaderSplit(unittest.TestCase):
 
+    def _get_compile_cmd(self, extra_args):
+        arch_flags = []
+        machine = platform.machine().lower()
+        if "arm" in machine or "aarch64" in machine:
+            if sys.platform == "linux":
+                arch_flags = ["-march=armv8-a+crc"]
+            elif sys.platform == "darwin":
+                arch_flags = ["-arch", "arm64"]
+        elif "x86" in machine or "amd64" in machine:
+            arch_flags = ["-march=native"]
+
+        compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+        return [compiler, "-std=c++20", *arch_flags, *extra_args]
+
     def test_d1_deflate_cpp_compiles(self):
         """modernized_zlib_deflate.cpp must compile cleanly as a standalone TU."""
         src = os.path.join(PROJECT_ROOT, "modernized", "modernized_zlib_deflate.cpp")
@@ -235,12 +249,8 @@ class TestConcernD_HeaderSplit(unittest.TestCase):
 
         out = os.path.join(BUILD_DIR, "deflate_cpp_test.o")
         os.makedirs(BUILD_DIR, exist_ok=True)
-        result = subprocess.run([
-            "clang++", "-std=c++20", "-O2", "-march=armv8-a+crc",
-            f"-I{MODERNIZED_DIR}",
-            "-c", src,
-            "-o", out
-        ], capture_output=True, text=True, timeout=60)
+        cmd = self._get_compile_cmd(["-O2", f"-I{MODERNIZED_DIR}", "-c", src, "-o", out])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0,
             f"modernized_zlib_deflate.cpp failed to compile:\n{result.stderr}")
         print(f"\n  ✅ D1 PASS: modernized_zlib_deflate.cpp compiles cleanly as standalone TU")
@@ -261,14 +271,13 @@ int main() {
         with open(src, "w") as f:
             f.write(src_content)
 
-        result = subprocess.run([
-            "clang++", "-std=c++20", "-O1", "-march=armv8-a+crc",
-            f"-I{MODERNIZED_DIR}",
-            # Must include the .cpp files that the header depends on (adler32, crc32)
+        cmd = self._get_compile_cmd([
+            "-O1", f"-I{MODERNIZED_DIR}",
             os.path.join(MODERNIZED_DIR, "modernized_official_adler32.cpp"),
             os.path.join(MODERNIZED_DIR, "modernized_zlib_crc32.cpp"),
             src, "-o", out
-        ], capture_output=True, text=True, timeout=60)
+        ])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0,
             f"Header-only inclusion failed:\n{result.stderr}")
         print(f"\n  ✅ D2 PASS: Header-only inclusion compiles with key symbols accessible")

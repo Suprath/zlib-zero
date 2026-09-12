@@ -28,8 +28,9 @@ def run_zlib_ng_parity_tests():
 
     # 2. Compile NeuralBinary Modernized Adler32 C++ Code into Shared Library
     with tempfile.TemporaryDirectory() as tmpdir:
-        mod_so = Path(tmpdir) / "libmod_adler.dylib"
-        cmd = ["clang++", "-shared", "-fPIC", "-O3", str(MODERNIZED_ADLER_CPP), "-o", str(mod_so)]
+        import shutil
+        compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+        cmd = [compiler, "-shared", "-fPIC", "-O3", str(MODERNIZED_ADLER_CPP), "-o", str(mod_so)]
         subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         mod_lib = ctypes.CDLL(str(mod_so))
