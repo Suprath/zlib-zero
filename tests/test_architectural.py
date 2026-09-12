@@ -18,6 +18,9 @@ DRIVER         = os.path.join(BUILD_DIR, "roundtrip_driver")
 
 
 def run(mode: str, data: bytes) -> bytes:
+    if not os.path.exists(DRIVER):
+        from test_zlib_roundtrip_correctness import build_test_binary
+        build_test_binary()
     r = subprocess.run([DRIVER, mode], input=data, capture_output=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"Driver failed (mode={mode}): {r.stderr.decode()}")
