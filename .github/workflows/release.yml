@@ -76,5 +76,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" "${PACKAGE_TARBALL}" \
             --title "Release ${GITHUB_REF_NAME}" \
-            --notes "Automated cross-platform build artifact for zlib-zero ${GITHUB_REF_NAME}" \
-            --clobber
+            --notes "Automated cross-platform build artifact for zlib-zero ${GITHUB_REF_NAME}" || \
+          gh release upload "${GITHUB_REF_NAME}" "${PACKAGE_TARBALL}" --clobber
