@@ -1,0 +1,58 @@
+name: zlib-zero Build & Release Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Libraries
+        run: cmake --build build --config Release
+
+      - name: Run Test Suite
+        run: python3 -m unittest discover -s tests -p "test_*.py"
+
+      - name: Package Release Assets (Unix)
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-v1.0.0}"
+          OS_NAME=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          PACKAGE_NAME="zlib-zero-${VERSION}-${OS_NAME}-${ARCH}"
+
+          mkdir -p "${PACKAGE_NAME}/include" "${PACKAGE_NAME}/lib"
+          cp modernized/*.hpp "${PACKAGE_NAME}/include/"
+          cp LICENSE README.md "${PACKAGE_NAME}/"
+
+          find build -name "libzlib_zero*" -o -name "libz_zero*" | xargs -I {} cp {} "${PACKAGE_NAME}/lib/" || true
+
+          tar -czvf "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+          echo "PACKAGE_TARBALL=${PACKAGE_NAME}.tar.gz" >> $GITHUB_ENV
+
+      - name: Upload GitHub Release Artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ env.PACKAGE_TARBALL }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

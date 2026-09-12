@@ -2,6 +2,9 @@
 build/
 build_cmake/
 build_roundtrip/
+zlib-zero-*/
+*.tar.gz
+*.zip
 *.o
 *.a
 *.dylib
