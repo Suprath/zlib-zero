@@ -53,6 +53,11 @@ def build_test_binary():
 #include <cstring>
 #include <cstdlib>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 // Include our modernized zlib headers
 #include "modernized_zlib_deflate.hpp"
 #include "modernized_official_adler32.cpp"
@@ -77,6 +82,10 @@ static void write_stdout(const std::vector<uint8_t>& v) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     if (argc < 2) {
         std::cerr << "Usage: roundtrip_driver [compress|decompress]\n";
         return 1;
