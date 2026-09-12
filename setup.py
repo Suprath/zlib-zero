@@ -20,6 +20,7 @@ elif sys.platform == "linux":
 zlib_zero_module = Extension(
     "zlib_zero",
     sources=[
+        "modernized/python_zlib_zero.cpp",
         "modernized/modernized_official_adler32.cpp",
         "modernized/modernized_zlib_crc32.cpp",
         "modernized/modernized_zlib_c_api.cpp",
@@ -35,7 +36,7 @@ long_description = open(readme_path, encoding="utf-8").read() if os.path.exists(
 
 setup(
     name="zlib-zero",
-    version="1.0.7",
+    version="1.0.11",
     description="High-Performance Modernized C++20 zlib Compression Engine",
     long_description=long_description,
     long_description_content_type="text/markdown",
