@@ -54,7 +54,7 @@ extern "C" uint32_t crc32_modernized(uint32_t crc, const uint8_t *buf, size_t le
 
     crc = (~crc) & 0xFFFFFFFFU;
 
-#if defined(__aarch64__) || defined(__ARM_FEATURE_CRC32)
+#if (defined(__aarch64__) || defined(__ARM_FEATURE_CRC32)) && (defined(__clang__) || defined(__GNUC__))
     // 1. ARM64 Hardware Path (Clang / GCC)
     while (len > 0 && (reinterpret_cast<uintptr_t>(buf) & 7) != 0) {
         uint32_t val = *buf++;
