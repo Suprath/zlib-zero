@@ -68,10 +68,13 @@ jobs:
           Compress-Archive -Path "${PACKAGE_NAME}" -DestinationPath "${PACKAGE_NAME}.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_TARBALL=${PACKAGE_NAME}.zip"
 
-      - name: Upload GitHub Release Artifacts
-        uses: softprops/action-gh-release@v2
+      - name: Create GitHub Release & Upload Asset (Native GitHub CLI)
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: ${{ env.PACKAGE_TARBALL }}
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "${PACKAGE_TARBALL}" \
+            --title "Release ${GITHUB_REF_NAME}" \
+            --notes "Automated cross-platform build artifact for zlib-zero ${GITHUB_REF_NAME}" \
+            --clobber
