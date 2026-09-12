@@ -35,9 +35,43 @@ Designed for high-throughput cloud microservices, data pipelines, and embedded a
 
 ---
 
-## Building & Installation
+## Installation & Usage
 
-### Option 1: Header-Only Integration (C++20)
+### Option 1: Python (`pip install`)
+
+Install directly via `pip` from PyPI:
+```bash
+pip install zlib-zero
+```
+
+Or install directly from GitHub:
+```bash
+pip install git+https://github.com/Suprath/zlib-zero.git
+```
+
+Usage in Python:
+```python
+import zlib_zero
+
+# Fast C++20 compression
+compressed = zlib_zero.compress_zlib(b"Data to compress " * 1000)
+```
+
+### Option 2: CMake Integration (`FetchContent`)
+Add directly into your project's `CMakeLists.txt`:
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    zlib_zero
+    GIT_REPOSITORY https://github.com/Suprath/zlib-zero.git
+    GIT_TAG        main
+)
+FetchContent_MakeAvailable(zlib_zero)
+
+target_link_libraries(your_target PRIVATE zlib_zero_static)
+```
+
+### Option 3: Header-Only Integration (C++20)
 Include the header directly in C++ compilation units:
 ```cpp
 #include "modernized_zlib_deflate.hpp"
@@ -49,7 +83,7 @@ auto compressed = ModernizedZlib::compress_zlib(data.data(), data.size());
 auto gz_compressed = ModernizedZlib::compress_gzip(data.data(), data.size(), "output.txt");
 ```
 
-### Option 2: CMake Build (Static & Dynamic Libraries)
+### Option 4: Build Shared & Static Libraries from Source
 ```bash
 git clone https://github.com/Suprath/zlib-zero.git
 cd zlib-zero
@@ -59,7 +93,7 @@ make
 ```
 Build outputs:
 - `libzlib_zero.a` (Static Library)
-- `libz_zero.dylib` / `libz_zero.so` (Shared Drop-In Library)
+- `libz_zero.dylib` / `libz_zero.so` / `zlib_zero.dll` (Shared Drop-In Library)
 
 ---
 
