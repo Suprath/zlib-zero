@@ -8,11 +8,12 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test (${{ matrix.os }})
+    name: Build & Release (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout Code
@@ -30,9 +31,11 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Run Test Suite
+        shell: bash
         run: python3 -m unittest discover -s tests -p "test_*.py"
 
       - name: Package Release Assets (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME:-v1.0.0}"
@@ -48,6 +51,19 @@ jobs:
 
           tar -czvf "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
           echo "PACKAGE_TARBALL=${PACKAGE_NAME}.tar.gz" >> $GITHUB_ENV
+
+      - name: Package Release Assets (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.0.0" }
+          $PACKAGE_NAME = "zlib-zero-${VERSION}-windows-x64"
+          New-Item -ItemType Directory -Path "${PACKAGE_NAME}/include", "${PACKAGE_NAME}/lib" -Force
+          Copy-Item modernized/*.hpp "${PACKAGE_NAME}/include/"
+          Copy-Item LICENSE, README.md "${PACKAGE_NAME}/"
+          Get-ChildItem -Path build -Recurse -Include *.lib, *.dll | Copy-Item -Destination "${PACKAGE_NAME}/lib/"
+          Compress-Archive -Path "${PACKAGE_NAME}" -DestinationPath "${PACKAGE_NAME}.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_TARBALL=${PACKAGE_NAME}.zip"
 
       - name: Upload GitHub Release Artifacts
         uses: softprops/action-gh-release@v2

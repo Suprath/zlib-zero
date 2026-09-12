@@ -78,42 +78,9 @@ extern "C" uint32_t crc32_modernized(uint32_t crc, const uint8_t *buf, size_t le
         len--;
     }
 
-#elif defined(__x86_64__)
-    // 2. Intel / AMD x86_64 SSE4.2 Hardware Path (Clang / GCC)
-    uint64_t crc64 = crc;
-    while (len >= 8) {
-        uint64_t val64;
-        std::memcpy(&val64, buf, sizeof(uint64_t));
-        crc64 = _mm_crc32_u64(crc64, val64);
-        buf += 8;
-        len -= 8;
-    }
-    crc = static_cast<uint32_t>(crc64);
-
-    while (len > 0) {
-        crc = _mm_crc32_u8(crc, *buf++);
-        len--;
-    }
-
-#elif defined(_MSC_VER) && defined(_M_X64)
-    // 3. MSVC Windows x86_64 Hardware Path
-    uint64_t crc64 = crc;
-    while (len >= 8) {
-        uint64_t val64;
-        std::memcpy(&val64, buf, sizeof(uint64_t));
-        crc64 = _mm_crc32_u64(crc64, val64);
-        buf += 8;
-        len -= 8;
-    }
-    crc = static_cast<uint32_t>(crc64);
-
-    while (len > 0) {
-        crc = _mm_crc32_u8(crc, *buf++);
-        len--;
-    }
-
 #else
-    // 4. Universal Software Slice-by-8 Fallback
+    // 2. High-Performance Slice-by-8 Fallback (IEEE 802.3 0xEDB88320)
+    // Works on all platforms (x86_64, x86, RISC-V, WebAssembly, Windows, Linux, macOS)
     while (len >= 8) {
         uint64_t chunk;
         std::memcpy(&chunk, buf, sizeof(uint64_t));
