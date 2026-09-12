@@ -1,5 +1,5 @@
 # C++ Build Artifacts
-pillar_3_symbolic/build/
+build/
 build_cmake/
 build_roundtrip/
 *.o
