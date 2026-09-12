@@ -118,10 +118,11 @@ int main(int argc, char** argv) {
             arch_flags = ["-march=armv8-a+crc"]
         elif sys.platform == "darwin":
             arch_flags = ["-arch", "arm64"]
-    elif "x86" in machine or "amd64" in machine:
+    elif ("x86" in machine or "amd64" in machine) and sys.platform != "win32":
         arch_flags = ["-march=native"]
 
     compiler = os.environ.get("CXX", "clang++" if shutil.which("clang++") else "g++")
+    pthread_flags = [] if sys.platform == "win32" else ["-lpthread"]
 
     cmd = [
         compiler, "-std=c++20", "-O2",
@@ -129,7 +130,7 @@ int main(int argc, char** argv) {
         f"-I{MODERNIZED_DIR}",
         driver_src,
         "-o", driver_bin,
-        "-lpthread"
+        *pthread_flags
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -159,9 +160,9 @@ class TestRoundTripCorrectness(unittest.TestCase):
     
     @classmethod
     def setUpClass(cls):
-        print("\n🔨 Compiling NeuralBinary test driver...", end=" ", flush=True)
+        print("\n[BUILD] Compiling zlib-zero test driver...", end=" ", flush=True)
         cls.driver = build_test_binary()
-        print("✅ OK")
+        print("[PASS] OK")
     
     def compress_ours(self, data: bytes) -> bytes:
         return run_driver(self.driver, "compress", data)
@@ -176,7 +177,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         return run_driver(self.driver, "decompress_raw", data)
     
     # ------------------------------------------------------------------ #
-    # Test 1: Our Compressor → Python zlib (critical cross-compat)
+    # Test 1: Our Compressor -> Python zlib (critical cross-compat)
     # ------------------------------------------------------------------ #
     def test_01_our_compress_python_decompress(self):
         """Our zlib output must be decompressible by Python's standard zlib."""
@@ -191,11 +192,11 @@ class TestRoundTripCorrectness(unittest.TestCase):
             f"(compressed={len(compressed)}B, expected={len(test_data)}B)")
         
         ratio = len(compressed) / len(test_data)
-        print(f"\n  ✅ Test 1 PASS: {len(test_data)}B → {len(compressed)}B "
+        print(f"\n  [PASS] Test 1: {len(test_data)}B -> {len(compressed)}B "
               f"(ratio={ratio:.3f}) | Python decompress: OK")
     
     # ------------------------------------------------------------------ #
-    # Test 2: Python zlib.compress() → Our Decompressor (critical)
+    # Test 2: Python zlib.compress() -> Our Decompressor (critical)
     # ------------------------------------------------------------------ #
     def test_02_python_compress_our_decompress(self):
         """Our decompressor must handle standard zlib output from Python."""
@@ -207,20 +208,20 @@ class TestRoundTripCorrectness(unittest.TestCase):
             f"Our decompressor failed on Python zlib input "
             f"(compressed={len(compressed)}B, expected={len(test_data)}B)")
         
-        print(f"\n  ✅ Test 2 PASS: Python compress {len(compressed)}B → "
+        print(f"\n  [PASS] Test 2: Python compress {len(compressed)}B -> "
               f"our decompress {len(decompressed)}B | Match: OK")
     
     # ------------------------------------------------------------------ #
-    # Test 3: Full round-trip (our compress → our decompress)
+    # Test 3: Full round-trip (our compress -> our decompress)
     # ------------------------------------------------------------------ #
     def test_03_full_roundtrip(self):
-        """Our compress → our decompress must produce identical output."""
-        test_data = b"NeuralBinary modernized zlib v2.0 round-trip test! " * 2000
+        """Our compress -> our decompress must produce identical output."""
+        test_data = b"zlib-zero modernized zlib v2.0 round-trip test! " * 2000
         compressed   = self.compress_ours(test_data)
         decompressed = self.decompress_ours(compressed)
         self.assertEqual(decompressed, test_data)
-        print(f"\n  ✅ Test 3 PASS: Full round-trip {len(test_data)}B "
-              f"→ {len(compressed)}B → {len(decompressed)}B")
+        print(f"\n  [PASS] Test 3: Full round-trip {len(test_data)}B "
+              f"-> {len(compressed)}B -> {len(decompressed)}B")
     
     # ------------------------------------------------------------------ #
     # Test 4: Empty input
@@ -232,7 +233,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         if len(compressed) > 0:
             decompressed = zlib.decompress(compressed)
             self.assertEqual(decompressed, b"")
-        print(f"\n  ✅ Test 4 PASS: Empty input → {len(compressed)}B compressed")
+        print(f"\n  [PASS] Test 4: Empty input -> {len(compressed)}B compressed")
     
     # ------------------------------------------------------------------ #
     # Test 5: Single byte
@@ -243,7 +244,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         compressed   = self.compress_ours(test_data)
         decompressed = zlib.decompress(compressed)
         self.assertEqual(decompressed, test_data)
-        print(f"\n  ✅ Test 5 PASS: Single byte round-trip OK")
+        print(f"\n  [PASS] Test 5: Single byte round-trip OK")
     
     # ------------------------------------------------------------------ #
     # Test 6: All-zero 1 MB (maximum compressibility)
@@ -260,7 +261,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         self.assertEqual(decompressed, test_data)
         
         ratio = len(compressed) / len(test_data)
-        print(f"\n  ✅ Test 6 PASS: 1MB zeros → {len(compressed)}B (ratio={ratio:.4f})")
+        print(f"\n  [PASS] Test 6: 1MB zeros -> {len(compressed)}B (ratio={ratio:.4f})")
     
     # ------------------------------------------------------------------ #
     # Test 7: Highly repetitive data (stress back-references)
@@ -275,7 +276,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         self.assertEqual(decompressed, test_data)
         
         ratio = len(compressed) / len(test_data)
-        print(f"\n  ✅ Test 7 PASS: Repetitive {len(test_data)}B → "
+        print(f"\n  [PASS] Test 7: Repetitive {len(test_data)}B -> "
               f"{len(compressed)}B (ratio={ratio:.4f})")
     
     # ------------------------------------------------------------------ #
@@ -291,7 +292,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         self.assertEqual(decompressed, test_data)
         
         ratio = len(compressed) / len(test_data)
-        print(f"\n  ✅ Test 8 PASS: Random 64KB → {len(compressed)}B (ratio={ratio:.3f})")
+        print(f"\n  [PASS] Test 8: Random 64KB -> {len(compressed)}B (ratio={ratio:.3f})")
     
     # ------------------------------------------------------------------ #
     # Test 9: README.md real-file round-trip
@@ -310,7 +311,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         self.assertEqual(decompressed, test_data)
         
         ratio = len(compressed) / len(test_data)
-        print(f"\n  ✅ Test 9 PASS: README.md {len(test_data)}B → "
+        print(f"\n  [PASS] Test 9: README.md {len(test_data)}B -> "
               f"{len(compressed)}B (ratio={ratio:.3f})")
     
     # ------------------------------------------------------------------ #
@@ -332,7 +333,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
         with self.assertRaises(zlib.error):
             zlib.decompress(corrupted)
         
-        print(f"\n  ✅ Test 10 PASS: Corrupt Adler-32 correctly detected")
+        print(f"\n  [PASS] Test 10: Corrupt Adler-32 correctly detected")
     
     # ------------------------------------------------------------------ #
     # Test 11: Raw DEFLATE internal round-trip (no zlib header)
@@ -343,11 +344,11 @@ class TestRoundTripCorrectness(unittest.TestCase):
         compressed   = self.compress_raw_ours(test_data)
         decompressed = self.decompress_raw_ours(compressed)
         self.assertEqual(decompressed, test_data)
-        print(f"\n  ✅ Test 11 PASS: Raw DEFLATE {len(test_data)}B → "
-              f"{len(compressed)}B → {len(decompressed)}B")
+        print(f"\n  [PASS] Test 11: Raw DEFLATE {len(test_data)}B -> "
+              f"{len(compressed)}B -> {len(decompressed)}B")
     
     # ------------------------------------------------------------------ #
-    # Test 12: zlib level-6 cross-compat (Python compress → our decompress)
+    # Test 12: zlib level-6 cross-compat (Python compress -> our decompress)
     # ------------------------------------------------------------------ #
     def test_12_various_python_compression_levels(self):
         """Our decompressor must handle all Python zlib compression levels."""
@@ -357,7 +358,7 @@ class TestRoundTripCorrectness(unittest.TestCase):
             decompressed = self.decompress_ours(compressed)
             self.assertEqual(decompressed, test_data,
                 f"Failed at compression level {level}")
-        print(f"\n  ✅ Test 12 PASS: All Python compression levels (1,3,6,9) decoded correctly")
+        print(f"\n  [PASS] Test 12: All Python compression levels (1,3,6,9) decoded correctly")
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +370,8 @@ class VerboseResult(unittest.TextTestResult):
         super().printErrors()
         if self.wasSuccessful():
             print("\n" + "="*70)
-            print("🎉  ALL ROUND-TRIP CORRECTNESS TESTS PASSED")
-            print("    NeuralBinary Modernized zlib is RFC 1951 / RFC 1950 compliant")
+            print("[SUCCESS] ALL ROUND-TRIP CORRECTNESS TESTS PASSED")
+            print("          zlib-zero Modernized zlib is RFC 1951 / RFC 1950 compliant")
             print("="*70)
 
 

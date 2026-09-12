@@ -54,18 +54,18 @@ class TestIssueFixes(unittest.TestCase):
         compressed   = run("compress", data)
         decompressed = zlib.decompress(compressed)
         self.assertEqual(decompressed, data,
-            "Fibonacci-weighted stream failed Python decompress → rebalance bug")
-        print(f"\n  ✅ I1 PASS: Fibonacci stream {len(data)}B → {len(compressed)}B → decompress OK")
+            "Fibonacci-weighted stream failed Python decompress -> rebalance bug")
+        print(f"\n  [PASS] I1 PASS: Fibonacci stream {len(data)}B -> {len(compressed)}B -> decompress OK")
 
     def test_i1_uniform_286_symbols(self):
         """All 286 lit/len symbols equally frequent: deep tree, rebalance required."""
-        # Make every byte 0-255 appear equally often — maximally flat distribution
+        # Make every byte 0-255 appear equally often - maximally flat distribution
         data = bytes(range(256)) * 20        # 5120 B
         compressed   = run("compress", data)
         decompressed = zlib.decompress(compressed)
         self.assertEqual(decompressed, data,
             "Uniform 256-symbol stream failed Python decompress")
-        print(f"\n  ✅ I1b PASS: Uniform 256-symbol {len(data)}B → {len(compressed)}B OK")
+        print(f"\n  [PASS] I1b PASS: Uniform 256-symbol {len(data)}B -> {len(compressed)}B OK")
 
     def test_i1_single_rare_byte(self):
         """One byte appears once among 4000 common bytes: extreme skew."""
@@ -73,15 +73,15 @@ class TestIssueFixes(unittest.TestCase):
         compressed   = run("compress", data)
         decompressed = zlib.decompress(compressed)
         self.assertEqual(decompressed, data)
-        print(f"\n  ✅ I1c PASS: Extreme skew stream {len(data)}B → {len(compressed)}B OK")
+        print(f"\n  [PASS] I1c PASS: Extreme skew stream {len(data)}B -> {len(compressed)}B OK")
 
-    # ─────────────────────────────────────────────────────────────────
-    # Issue 3 — BFINAL consistency: the fixed and dynamic paths must
+    # -----------------------------------------------------------------
+    # Issue 3 - BFINAL consistency: the fixed and dynamic paths must
     # both respect the is_final flag (no hardcoded BFINAL=1).
-    # We verify by compressing a large file (>128KB) — the parallel
+    # We verify by compressing a large file (>128KB) - the parallel
     # path emits BFINAL=0 on intermediate chunks; Python zlib must
     # still decompress the result correctly.
-    # ─────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     def test_i3_bfinal_parallel_consistency(self):
         """Large input triggers parallel chunking; all but last chunk must have BFINAL=0."""
         data = (b"Parallel DEFLATE BFINAL test block. " * 100) * 40   # ~144 KB
@@ -90,14 +90,14 @@ class TestIssueFixes(unittest.TestCase):
         compressed   = run("compress", data)
         decompressed = zlib.decompress(compressed)
         self.assertEqual(decompressed, data,
-            "Parallel chunked stream failed Python decompress → BFINAL issue")
+            "Parallel chunked stream failed Python decompress -> BFINAL issue")
 
         # Verify: last block must have BFINAL=1 (bit 0 of payload byte 0 after the header)
         # The raw DEFLATE starts at offset 2 (after CMF/FLG)
         raw_deflate_first_byte = compressed[2]
         # We can't trivially check all intermediate BFINAL without parsing; round-trip suffices
-        print(f"\n  ✅ I3 PASS: Parallel chunked {len(data)}B → "
-              f"{len(compressed)}B → Python decompress OK")
+        print(f"\n  [PASS] I3 PASS: Parallel chunked {len(data)}B -> "
+              f"{len(compressed)}B -> Python decompress OK")
 
     def test_i3_small_input_bfinal_1(self):
         """Small input (<128KB) must always produce BFINAL=1 in the raw payload."""
@@ -109,16 +109,16 @@ class TestIssueFixes(unittest.TestCase):
         # BFINAL is bit 0 of the first byte of raw DEFLATE
         bfinal = raw[0] & 0x01
         self.assertEqual(bfinal, 1, "Single-block small input must have BFINAL=1")
-        print(f"\n  ✅ I3b PASS: Small input has BFINAL=1 in first raw byte")
+        print(f"\n  [PASS] I3b PASS: Small input has BFINAL=1 in first raw byte")
 
-    # ─────────────────────────────────────────────────────────────────
-    # Issue 4 — Null guard: compress_zlib(nullptr, 0) must not crash
+    # -----------------------------------------------------------------
+    # Issue 4 - Null guard: compress_zlib(nullptr, 0) must not crash
     # and must produce a valid, decompressible empty-content stream.
-    # ─────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     def test_i4_empty_null_guard(self):
         """Empty input (len=0) must not crash and must produce valid zlib stream."""
         compressed = run("compress", b"")
-        # Must be at least 8 bytes: 2 header + ≥2 DEFLATE (BFINAL+BTYPE+EOB) + 4 trailer
+        # Must be at least 8 bytes: 2 header + >=2 DEFLATE (BFINAL+BTYPE+EOB) + 4 trailer
         self.assertGreaterEqual(len(compressed), 8,
             f"Empty compress produced too-short output: {len(compressed)}B")
 
@@ -130,12 +130,12 @@ class TestIssueFixes(unittest.TestCase):
         stored_adler = struct.unpack(">I", compressed[-4:])[0]
         self.assertEqual(stored_adler, 1,
             f"Empty data Adler-32 should be 1, got {stored_adler:#010x}")
-        print(f"\n  ✅ I4 PASS: Empty input → {len(compressed)}B, Adler-32=1, decode OK")
+        print(f"\n  [PASS] I4 PASS: Empty input -> {len(compressed)}B, Adler-32=1, decode OK")
 
-    # ─────────────────────────────────────────────────────────────────
-    # Issue 6 — dist_val width: large distance back-references
+    # -----------------------------------------------------------------
+    # Issue 6 - dist_val width: large distance back-references
     # (distance close to 32768) must survive Token storage.
-    # ─────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     def test_i6_large_distance_backref(self):
         """Matches at distance approaching 32768 must not be truncated."""
         # Pattern: 32KB of zeros, then repeat a 10-byte pattern from the beginning.
@@ -150,13 +150,13 @@ class TestIssueFixes(unittest.TestCase):
         self.assertEqual(decompressed, data,
             f"Large-distance back-reference round-trip failed "
             f"(data={len(data)}B, compressed={len(compressed)}B)")
-        print(f"\n  ✅ I6 PASS: Large-distance ({len(prefix)}B prefix) back-ref round-trip OK")
+        print(f"\n  [PASS] I6 PASS: Large-distance ({len(prefix)}B prefix) back-ref round-trip OK")
 
-    # ─────────────────────────────────────────────────────────────────
-    # Issue 7 — FDICT flag: decompress_zlib() must correctly skip the
+    # -----------------------------------------------------------------
+    # Issue 7 - FDICT flag: decompress_zlib() must correctly skip the
     # 4-byte dict checksum when FLG bit 5 is set, rather than trying
     # to decompress the dict checksum as DEFLATE data.
-    # ─────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     def test_i7_fdict_header_skip(self):
         """A synthetic FDICT zlib stream: our decompressor must skip the dict bytes."""
         # Build a valid zlib stream without FDICT, then inject the FDICT bit
@@ -201,7 +201,7 @@ class TestIssueFixes(unittest.TestCase):
         self.assertEqual(decompressed, data,
             f"FDICT stream parsing failed: expected {len(data)}B, got {len(decompressed)}B. "
             f"Likely still reading dict bytes as DEFLATE payload.")
-        print(f"\n  ✅ I7 PASS: FDICT stream ({len(fdict_stream)}B) correctly skips 4-byte dict field")
+        print(f"\n  [PASS] I7 PASS: FDICT stream ({len(fdict_stream)}B) correctly skips 4-byte dict field")
 
     def test_i7_no_fdict_unaffected(self):
         """Normal streams without FDICT must still decompress correctly after the fix."""
@@ -209,7 +209,7 @@ class TestIssueFixes(unittest.TestCase):
         compressed   = run("compress", data)
         decompressed = run("decompress", compressed)
         self.assertEqual(decompressed, data)
-        print(f"\n  ✅ I7b PASS: Normal (no-FDICT) stream unaffected by FDICT fix")
+        print(f"\n  [PASS] I7b PASS: Normal (no-FDICT) stream unaffected by FDICT fix")
 
 
 class VerboseResult(unittest.TextTestResult):
@@ -217,8 +217,8 @@ class VerboseResult(unittest.TextTestResult):
         super().printErrors()
         if self.wasSuccessful():
             print("\n" + "="*70)
-            print("🎉  ALL ISSUE-FIX REGRESSION TESTS PASSED")
-            print("    Issues 1, 3, 4, 6, 7 verified correct")
+            print("[SUCCESS] ALL ISSUE-FIX REGRESSION TESTS PASSED")
+            print("          Issues 1, 3, 4, 6, 7 verified correct")
             print("="*70)
 
 
