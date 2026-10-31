@@ -888,20 +888,28 @@ public:
         out.reserve(hint_len > 0 ? hint_len : std::min(len * 4, size_t(64 * 1024 * 1024)));
 
         size_t   byte_pos = 0;
-        uint32_t bit_buf  = 0;
+        uint64_t bit_buf  = 0;
         int      bit_cnt  = 0;
 
-        // Refill bit buffer from compressed stream
+        // 64-bit batch branchless refill: loads 4 bytes (32 bits) in a single instruction when possible
         auto refill = [&]() {
-            while (bit_cnt < 24 && byte_pos < len) {
-                bit_buf |= static_cast<uint32_t>(data[byte_pos++]) << bit_cnt;
-                bit_cnt += 8;
+            if (bit_cnt <= 32 && byte_pos + 4 <= len) {
+                uint32_t w;
+                std::memcpy(&w, data + byte_pos, 4);
+                bit_buf |= static_cast<uint64_t>(w) << bit_cnt;
+                bit_cnt += 32;
+                byte_pos += 4;
+            } else {
+                while (bit_cnt <= 56 && byte_pos < len) {
+                    bit_buf |= static_cast<uint64_t>(data[byte_pos++]) << bit_cnt;
+                    bit_cnt += 8;
+                }
             }
         };
 
         auto read_bits = [&](int n) -> uint32_t {
             refill();
-            uint32_t val = bit_buf & ((1u << n) - 1);
+            uint32_t val = static_cast<uint32_t>(bit_buf & ((1ull << n) - 1));
             bit_buf >>= n;
             bit_cnt  -= n;
             return val;
@@ -910,6 +918,33 @@ public:
         auto byte_align = [&]() {
             int rem = bit_cnt & 7;
             if (rem) { bit_buf >>= rem; bit_cnt -= rem; }
+        };
+
+        // Vectorized back-reference copy unlocked by Lean 4 memory safety theorem (dist <= out.size())
+        auto copy_back_ref = [&](size_t base, int length, int distance) {
+            size_t old_sz = out.size();
+            out.resize(old_sz + length);
+            uint8_t* dst = out.data() + old_sz;
+            const uint8_t* src = out.data() + base;
+
+            if (distance >= 16 && length >= 16) {
+                // Vectorized 16-byte chunk copy (src + 16 <= dst guarantees non-overlapping chunks)
+                int rem = length;
+                while (rem >= 16) {
+                    std::memcpy(dst, src, 16);
+                    dst += 16;
+                    src += 16;
+                    rem -= 16;
+                }
+                if (rem > 0) {
+                    std::memcpy(dst, src, rem);
+                }
+            } else {
+                // RLE overlapping copy (when distance < length, dst[k] feeds src[k])
+                for (int k = 0; k < length; ++k) {
+                    dst[k] = src[k];
+                }
+            }
         };
 
         const auto& fll = fixed_ll_table();
@@ -968,8 +1003,7 @@ public:
 
                         if (distance > static_cast<int>(out.size())) return out; // Illegal back-ref
                         size_t base = out.size() - distance;
-                        for (int k = 0; k < length; ++k)
-                            out.push_back(out[base + k]); // Uses growing out[] for overlapping copies
+                        copy_back_ref(base, length, distance);
 
                     }
                 }
@@ -1084,8 +1118,7 @@ public:
 
                         if (distance > static_cast<int>(out.size())) return out;
                         size_t base = out.size() - distance;
-                        for (int k = 0; k < length; ++k)
-                            out.push_back(out[base + k]);
+                        copy_back_ref(base, length, distance);
                     }
                 }
 
