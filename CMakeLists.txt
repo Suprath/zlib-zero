@@ -24,6 +24,7 @@ set(SOURCES
     modernized/modernized_zlib_crc32.cpp
     modernized/modernized_zlib_c_api.cpp
     modernized/modernized_zlib_deflate.cpp
+    modernized/modernized_verified_extract.cpp
 )
 
 # Static Library (libzlib_zero_static.a)

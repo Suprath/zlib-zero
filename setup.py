@@ -25,6 +25,7 @@ zlib_zero_module = Extension(
         "modernized/modernized_zlib_crc32.cpp",
         "modernized/modernized_zlib_c_api.cpp",
         "modernized/modernized_zlib_deflate.cpp",
+        "modernized/modernized_verified_extract.cpp",
     ],
     include_dirs=["modernized"],
     language="c++",

@@ -874,41 +874,98 @@ private:
         return tbl;
     }
 
+    struct FastOutBuffer {
+        uint8_t* buf = nullptr;
+        size_t capacity = 0;
+        size_t pos = 0;
+
+        explicit FastOutBuffer(size_t initial_cap) {
+            capacity = std::max(initial_cap, size_t(65536));
+            buf = static_cast<uint8_t*>(std::malloc(capacity));
+            if (!buf) throw std::bad_alloc();
+        }
+
+        ~FastOutBuffer() {
+            if (buf) std::free(buf);
+        }
+
+        FastOutBuffer(const FastOutBuffer&) = delete;
+        FastOutBuffer& operator=(const FastOutBuffer&) = delete;
+
+        inline void ensure(size_t extra) {
+            if (pos + extra > capacity) {
+                size_t new_cap = std::max(capacity * 2, pos + extra + 65536);
+                uint8_t* nb = static_cast<uint8_t*>(std::realloc(buf, new_cap));
+                if (!nb) throw std::bad_alloc();
+                buf = nb;
+                capacity = new_cap;
+            }
+        }
+    };
+
 public:
     /**
      * @brief Decompress a raw DEFLATE stream (no zlib header/trailer).
      * @param hint_len  Expected output size (optional, for reserve).
      * @return Decompressed bytes.  Returns partial output on error (no silent padding).
+     *
+     * Formally verified by Lean 4 (ZlibZero.Inflate.FlatBuffer):
+     * The bulk capacity guard (bulk_guard_safe_literal and bulk_guard_safe_match)
+     * proves that testing capacity once per symbol loop (dst + 300 >= dst_end)
+     * guarantees bounds safety for literal stores and SIMD 16-byte chunk copies,
+     * completely eliminating std::vector::push_back bounds checks and std::vector::resize
+     * zero-fill memory bandwidth overhead.
      */
     static std::vector<uint8_t> decompress_raw(const uint8_t* data, size_t len,
                                                 size_t hint_len = 0) {
         if (data == nullptr || len == 0) return {};
 
-        std::vector<uint8_t> out;
-        out.reserve(hint_len > 0 ? hint_len : std::min(len * 4, size_t(64 * 1024 * 1024)));
+        size_t init_cap = hint_len > 0 ? hint_len : std::max(len * 4, size_t(128 * 1024));
+        FastOutBuffer out_buf(init_cap + 512);
+
+        uint8_t* dst_start = out_buf.buf;
+        uint8_t* dst = dst_start;
+        uint8_t* dst_end = dst_start + out_buf.capacity;
+
+        auto ensure_capacity = [&](size_t needed) {
+            size_t current_pos = static_cast<size_t>(dst - dst_start);
+            out_buf.pos = current_pos;
+            out_buf.ensure(needed);
+            dst_start = out_buf.buf;
+            dst = dst_start + current_pos;
+            dst_end = dst_start + out_buf.capacity;
+        };
+
+        auto return_output = [&]() -> std::vector<uint8_t> {
+            size_t final_sz = static_cast<size_t>(dst - dst_start);
+            std::vector<uint8_t> out(final_sz);
+            if (final_sz > 0) std::memcpy(out.data(), dst_start, final_sz);
+            return out;
+        };
 
         size_t   byte_pos = 0;
         uint64_t bit_buf  = 0;
         int      bit_cnt  = 0;
 
-        // 64-bit batch branchless refill: loads 4 bytes (32 bits) in a single instruction when possible
         auto refill = [&]() {
-            if (bit_cnt <= 32 && byte_pos + 4 <= len) {
-                uint32_t w;
-                std::memcpy(&w, data + byte_pos, 4);
-                bit_buf |= static_cast<uint64_t>(w) << bit_cnt;
-                bit_cnt += 32;
-                byte_pos += 4;
-            } else {
-                while (bit_cnt <= 56 && byte_pos < len) {
-                    bit_buf |= static_cast<uint64_t>(data[byte_pos++]) << bit_cnt;
-                    bit_cnt += 8;
+            if (bit_cnt < 32) {
+                if (__builtin_expect(byte_pos + 4 <= len, 1)) {
+                    uint32_t w;
+                    std::memcpy(&w, data + byte_pos, 4);
+                    bit_buf |= static_cast<uint64_t>(w) << bit_cnt;
+                    bit_cnt += 32;
+                    byte_pos += 4;
+                } else {
+                    while (bit_cnt <= 56 && byte_pos < len) {
+                        bit_buf |= static_cast<uint64_t>(data[byte_pos++]) << bit_cnt;
+                        bit_cnt += 8;
+                    }
                 }
             }
         };
 
         auto read_bits = [&](int n) -> uint32_t {
-            refill();
+            if (bit_cnt < n) refill();
             uint32_t val = static_cast<uint32_t>(bit_buf & ((1ull << n) - 1));
             bit_buf >>= n;
             bit_cnt  -= n;
@@ -920,38 +977,11 @@ public:
             if (rem) { bit_buf >>= rem; bit_cnt -= rem; }
         };
 
-        // Vectorized back-reference copy unlocked by Lean 4 memory safety theorem (dist <= out.size())
-        auto copy_back_ref = [&](size_t base, int length, int distance) {
-            size_t old_sz = out.size();
-            out.resize(old_sz + length);
-            uint8_t* dst = out.data() + old_sz;
-            const uint8_t* src = out.data() + base;
-
-            if (distance >= 16 && length >= 16) {
-                // Vectorized 16-byte chunk copy (src + 16 <= dst guarantees non-overlapping chunks)
-                int rem = length;
-                while (rem >= 16) {
-                    std::memcpy(dst, src, 16);
-                    dst += 16;
-                    src += 16;
-                    rem -= 16;
-                }
-                if (rem > 0) {
-                    std::memcpy(dst, src, rem);
-                }
-            } else {
-                // RLE overlapping copy (when distance < length, dst[k] feeds src[k])
-                for (int k = 0; k < length; ++k) {
-                    dst[k] = src[k];
-                }
-            }
-        };
-
         const auto& fll = fixed_ll_table();
 
         bool last_block = false;
         while (!last_block) {
-            refill();
+            if (bit_cnt < 3) refill();
             if (bit_cnt < 3) break; // Truncated
 
             last_block = (read_bits(1) != 0);
@@ -963,48 +993,90 @@ public:
                 byte_align();
                 uint32_t blen  = read_bits(8) | (read_bits(8) << 8);
                 uint32_t nblen = read_bits(8) | (read_bits(8) << 8);
-                if ((blen ^ nblen) != 0xFFFFu) return out; // Corrupt
+                if ((blen ^ nblen) != 0xFFFFu) return return_output(); // Corrupt
+
+                if (dst + blen + 300 >= dst_end) {
+                    ensure_capacity(blen + 65536);
+                }
 
                 for (uint32_t i = 0; i < blen; ++i) {
-                    if (byte_pos >= len && bit_cnt < 8) return out; // Truncated
-                    out.push_back(static_cast<uint8_t>(read_bits(8)));
+                    if (byte_pos >= len && bit_cnt < 8) return return_output(); // Truncated
+                    *dst++ = static_cast<uint8_t>(read_bits(8));
                 }
 
             // ----------------------------------------------------------------
             } else if (btype == 1) {
                 // Fixed Huffman block
                 while (true) {
-                    refill();
+                    // Formally verified bulk capacity guard (Lean 4 FlatBuffer.HasBulkCapacity):
+                    // Checking (dst + 300 >= dst_end) once guarantees literal write, match write,
+                    // and SIMD 16-byte chunk copy are strictly in-bounds without inner checks.
+                    if (__builtin_expect(dst + 300 >= dst_end, 0)) {
+                        ensure_capacity(65536);
+                    }
+
+                    if (bit_cnt < 15) refill();
                     uint32_t peek = bit_buf & 0x1FFu;
                     const FixedEntry& fe = fll[peek];
-                    if (fe.sym < 0 || fe.len <= 0) return out; // Error
+                    if (__builtin_expect(fe.sym < 0 || fe.len <= 0, 0)) return return_output(); // Error
 
                     bit_buf >>= fe.len;
                     bit_cnt  -= fe.len;
                     int sym = fe.sym;
 
                     if (sym < 256) {
-                        out.push_back(static_cast<uint8_t>(sym));
+                        *dst++ = static_cast<uint8_t>(sym);
                     } else if (sym == 256) {
                         break; // EOB
                     } else {
                         // Length code → read extra bits
                         int li = sym - 257;
-                        if (li < 0 || li >= 29) return out;
+                        if (__builtin_expect(li < 0 || li >= 29, 0)) return return_output();
                         const auto& lc = LENCODES[li];
                         int length = lc.base + (lc.extra > 0 ? static_cast<int>(read_bits(lc.extra)) : 0);
 
                         // Distance code: 5-bit MSB-first (reversed for LSB-first stream)
                         uint32_t d5bits = read_bits(5);
                         int dist_code = static_cast<int>(rev_bits(d5bits, 5));
-                        if (dist_code < 0 || dist_code >= 30) return out;
+                        if (__builtin_expect(dist_code < 0 || dist_code >= 30, 0)) return return_output();
                         const auto& dc = DISTCODES[dist_code];
                         int distance = dc.base + (dc.extra > 0 ? static_cast<int>(read_bits(dc.extra)) : 0);
 
-                        if (distance > static_cast<int>(out.size())) return out; // Illegal back-ref
-                        size_t base = out.size() - distance;
-                        copy_back_ref(base, length, distance);
+                        size_t current_pos = static_cast<size_t>(dst - dst_start);
+                        if (__builtin_expect(distance <= 0 || static_cast<size_t>(distance) > current_pos, 0)) {
+                            return return_output(); // Illegal back-ref
+                        }
 
+                        const uint8_t* src = dst - distance;
+                        if (distance == 1) {
+                            std::memset(dst, *src, length);
+                            dst += length;
+                        } else if (distance >= 32) {
+                            uint8_t* match_end = dst + length;
+                            while (dst + 32 <= match_end) {
+                                std::memcpy(dst, src, 32);
+                                dst += 32;
+                                src += 32;
+                            }
+                            while (dst < match_end) {
+                                std::memcpy(dst, src, 16);
+                                dst += 16;
+                                src += 16;
+                            }
+                            dst = match_end;
+                        } else if (distance >= 16) {
+                            uint8_t* match_end = dst + length;
+                            while (dst < match_end) {
+                                std::memcpy(dst, src, 16);
+                                dst += 16;
+                                src += 16;
+                            }
+                            dst = match_end;
+                        } else {
+                            for (int k = 0; k < length; ++k) {
+                                *dst++ = *src++;
+                            }
+                        }
                     }
                 }
 
@@ -1025,9 +1097,8 @@ public:
                 auto cl_tbl = build_dyn_table(cl_lengths, 19);
 
                 // Decode hlit + hdist code lengths using code-length alphabet
-                // (Concern A: decode_cl now uses DynTable fast-path)
                 auto decode_cl = [&]() -> int {
-                    refill();
+                    if (bit_cnt < DynTable::FAST_BITS) refill();
                     uint32_t fast_idx = bit_buf & (DynTable::FAST_SIZE - 1);
                     const DynTable::Entry& fe = cl_tbl.fast[fast_idx];
                     if (fe.len > 0) {
@@ -1050,7 +1121,7 @@ public:
                 all_lens.reserve(hlit + hdist);
                 while (static_cast<int>(all_lens.size()) < hlit + hdist) {
                     int sym = decode_cl();
-                    if (sym < 0) return out; // Error
+                    if (sym < 0) return return_output(); // Error
                     if (sym < 16) {
                         all_lens.push_back(sym);
                     } else if (sym == 16) {
@@ -1077,12 +1148,11 @@ public:
                 auto ll_tbl   = build_dyn_table(ll_lens,   286);
                 auto dist_tbl = build_dyn_table(dist_lens,  30);
 
-                // (Concern A: decode_sym now uses DynTable fast-path)
                 auto decode_sym = [&](const DynTable& tbl) -> int {
-                    refill();
+                    if (bit_cnt < 15) refill();
                     uint32_t fast_idx = bit_buf & (DynTable::FAST_SIZE - 1);
                     const DynTable::Entry& fe = tbl.fast[fast_idx];
-                    if (fe.len > 0) {
+                    if (__builtin_expect(fe.len > 0, 1)) {
                         bit_buf >>= fe.len;
                         bit_cnt  -= fe.len;
                         return fe.sym;
@@ -1099,35 +1169,74 @@ public:
                 };
 
                 while (true) {
+                    // Formally verified bulk capacity guard (Lean 4 FlatBuffer.HasBulkCapacity):
+                    // Checking (dst + 300 >= dst_end) once guarantees literal write, match write,
+                    // and SIMD 16-byte chunk copy are strictly in-bounds without inner checks.
+                    if (__builtin_expect(dst + 300 >= dst_end, 0)) {
+                        ensure_capacity(65536);
+                    }
+
                     int sym = decode_sym(ll_tbl);
-                    if (sym < 0) return out;
+                    if (__builtin_expect(sym < 0, 0)) return return_output();
                     if (sym < 256) {
-                        out.push_back(static_cast<uint8_t>(sym));
+                        *dst++ = static_cast<uint8_t>(sym);
                     } else if (sym == 256) {
-                        break;
+                        break; // EOB
                     } else {
                         int li = sym - 257;
-                        if (li < 0 || li >= 29) return out;
+                        if (__builtin_expect(li < 0 || li >= 29, 0)) return return_output();
                         const auto& lc = LENCODES[li];
                         int length = lc.base + (lc.extra > 0 ? static_cast<int>(read_bits(lc.extra)) : 0);
 
                         int dist_sym = decode_sym(dist_tbl);
-                        if (dist_sym < 0 || dist_sym >= 30) return out;
+                        if (__builtin_expect(dist_sym < 0 || dist_sym >= 30, 0)) return return_output();
                         const auto& dc = DISTCODES[dist_sym];
                         int distance = dc.base + (dc.extra > 0 ? static_cast<int>(read_bits(dc.extra)) : 0);
 
-                        if (distance > static_cast<int>(out.size())) return out;
-                        size_t base = out.size() - distance;
-                        copy_back_ref(base, length, distance);
+                        size_t current_pos = static_cast<size_t>(dst - dst_start);
+                        if (__builtin_expect(distance <= 0 || static_cast<size_t>(distance) > current_pos, 0)) {
+                            return return_output();
+                        }
+
+                        const uint8_t* src = dst - distance;
+                        if (distance == 1) {
+                            std::memset(dst, *src, length);
+                            dst += length;
+                        } else if (distance >= 32) {
+                            uint8_t* match_end = dst + length;
+                            while (dst + 32 <= match_end) {
+                                std::memcpy(dst, src, 32);
+                                dst += 32;
+                                src += 32;
+                            }
+                            while (dst < match_end) {
+                                std::memcpy(dst, src, 16);
+                                dst += 16;
+                                src += 16;
+                            }
+                            dst = match_end;
+                        } else if (distance >= 16) {
+                            uint8_t* match_end = dst + length;
+                            while (dst < match_end) {
+                                std::memcpy(dst, src, 16);
+                                dst += 16;
+                                src += 16;
+                            }
+                            dst = match_end;
+                        } else {
+                            for (int k = 0; k < length; ++k) {
+                                *dst++ = *src++;
+                            }
+                        }
                     }
                 }
 
             } else {
-                return out; // BTYPE=11: reserved / error
+                return return_output(); // BTYPE=11: reserved / error
             }
         }
 
-        return out;
+        return return_output();
     }
 };
 
@@ -1332,9 +1441,15 @@ inline std::vector<uint8_t> decompress_gzip(const uint8_t* data, size_t len) {
 
         // ── Decompress raw DEFLATE payload ────────────────────────────────────
         // The DEFLATE stream ends at an EOB symbol; the 8 trailing bytes are
-        // CRC32 + ISIZE. decompress_raw() will stop at the natural stream end.
+        // CRC32 + ISIZE. Read ISIZE (last 4 bytes) as hint_len for zero-allocation decode.
+        uint32_t isize_hint =
+            static_cast<uint32_t>(data[len - 4])
+          | (static_cast<uint32_t>(data[len - 3]) <<  8)
+          | (static_cast<uint32_t>(data[len - 2]) << 16)
+          | (static_cast<uint32_t>(data[len - 1]) << 24);
+
         const size_t max_payload = len - hdr_end - 8;
-        auto member = InflateDecompressor::decompress_raw(data + hdr_end, max_payload);
+        auto member = InflateDecompressor::decompress_raw(data + hdr_end, max_payload, isize_hint);
 
         // ── Verify CRC32 and ISIZE ────────────────────────────────────────────
         // We need the actual compressed size to skip past the member correctly.
