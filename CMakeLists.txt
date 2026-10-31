@@ -34,4 +34,16 @@ set_target_properties(zlib_zero_static PROPERTIES OUTPUT_NAME "zlib_zero")
 add_library(zlib_zero SHARED ${SOURCES})
 set_target_properties(zlib_zero PROPERTIES OUTPUT_NAME "z_zero")
 
+# Lean 4 Mathematical Formal Verification Target
+find_program(LAKE_EXECUTABLE lake HINTS "$ENV{HOME}/.elan/bin" "/opt/homebrew/bin")
+if(LAKE_EXECUTABLE)
+    message(STATUS "Lean 4 Formal Verification: Enabled (${LAKE_EXECUTABLE})")
+    add_custom_target(verify
+        COMMAND ${LAKE_EXECUTABLE} exe zlib_verify
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/verified
+        COMMENT "Running Lean 4 Mathematical Verification proofs"
+    )
+endif()
+
 message(STATUS "zlib-zero High-Performance C++20 compression library configured successfully.")
+
