@@ -38,8 +38,8 @@ namespace ModernizedZlib {
 extern "C" uint32_t adler32_modernized(uint32_t adler, const uint8_t* buf, size_t len);
 extern "C" uint32_t crc32_modernized(uint32_t crc,   const uint8_t* buf, size_t len);
 
-constexpr size_t PARALLEL_THRESHOLD = 128 * 1024; ///< 128 KB adaptive threshold
-constexpr size_t CHUNK_SIZE         = 1024 * 1024; ///< 1 MB parallel chunk size
+constexpr size_t PARALLEL_THRESHOLD = 128 * 1024; ///< 128 KB threshold
+constexpr size_t CHUNK_SIZE         = 128 * 1024; ///< 128 KB parallel chunk size
 
 // ===========================================================================
 // §1  RFC 1951 STATIC TABLES
@@ -130,13 +130,13 @@ static inline int find_dist_idx(int dist) {
 class BitWriter {
 public:
     std::vector<uint8_t>& out;
-    uint32_t buf  = 0;
+    uint64_t buf  = 0;
     int      cnt  = 0;
 
     explicit BitWriter(std::vector<uint8_t>& o) : out(o) {}
 
     /// Append @p bits LSB-first bits of @p val to stream
-    void send(uint32_t val, int bits) {
+    void send(uint64_t val, int bits) {
         buf |= (val << cnt);
         cnt += bits;
         while (cnt >= 8) {
@@ -279,7 +279,21 @@ public:
         }
 
         bw.send_fixed_sym(256); // End-Of-Block symbol
-        bw.flush();
+
+        if (!is_final) {
+            // Non-final parallel chunk: append empty stored block header (BFINAL=0, BTYPE=00)
+            // followed by LEN=0x0000 NLEN=0xFFFF to byte-align stream for next chunk (pigz / RFC 1951).
+            bw.send(0u, 1); // BFINAL=0
+            bw.send(0u, 2); // BTYPE=00 (stored block)
+            bw.flush();
+            out.push_back(0x00);
+            out.push_back(0x00);
+            out.push_back(0xFF);
+            out.push_back(0xFF);
+        } else {
+            bw.flush();
+        }
+
         return out;
     }
 
@@ -596,9 +610,15 @@ public:
             16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15
         };
 
-        // Merge ll + dist lengths for RLE encoding
-        std::vector<int> all_lens(ll_lens.begin(),   ll_lens.begin()   + 286);
-        all_lens.insert(all_lens.end(), dist_lens.begin(), dist_lens.begin() + 30);
+        // Compute HLIT, HDIST
+        int hlit = 257;
+        for (int i = 285; i >= 257; --i) if (ll_lens[i] > 0) { hlit = i + 1; break; }
+        int hdist = 1;
+        for (int i = 29;  i >= 1;   --i) if (dist_lens[i] > 0) { hdist = i + 1; break; }
+
+        // Merge ll (0..hlit-1) + dist (0..hdist-1) lengths for RLE encoding (RFC 1951 §3.2.7)
+        std::vector<int> all_lens(ll_lens.begin(), ll_lens.begin() + hlit);
+        all_lens.insert(all_lens.end(), dist_lens.begin(), dist_lens.begin() + hdist);
 
         auto cl_syms = rle_encode_lengths(all_lens);
 
@@ -608,11 +628,6 @@ public:
         auto cl_lens = build_lengths(cl_freq.data(), 19, 7);
         auto cl_codes = gen_canonical_codes(cl_lens, 19);
 
-        // Compute HLIT, HDIST, HCLEN
-        int hlit = 257;
-        for (int i = 285; i >= 257; --i) if (ll_lens[i] > 0) { hlit  = i + 1; break; }
-        int hdist = 1;
-        for (int i = 29;  i >= 1;   --i) if (dist_lens[i] > 0) { hdist = i + 1; break; }
         int hclen = 4;
         for (int i = 18;  i >= 4;   --i)
             if (cl_lens[HCLEN_ORDER[i]] > 0) { hclen = i + 1; break; }
@@ -665,6 +680,18 @@ public:
         }
 
         bw.flush();
+        if (!is_final) {
+            // Sync-flush to byte boundary per RFC 1951 §3.2.4:
+            // Emit empty stored block at byte boundary (5 bytes):
+            // Byte 0: BFINAL=0 (1 bit), BTYPE=00 (2 bits), 00000 padding (5 bits) = 0x00
+            // Bytes 1-2: LEN = 0x0000
+            // Bytes 3-4: NLEN = 0xFFFF
+            out.push_back(0x00);
+            out.push_back(0x00);
+            out.push_back(0x00);
+            out.push_back(0xFF);
+            out.push_back(0xFF);
+        }
         return out;
     }
 };
@@ -692,34 +719,35 @@ public:
             return DeflateCompressor::compress_block(data, len, /*is_final=*/true);
 
         size_t num_chunks = (len + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        std::vector<std::future<std::vector<uint8_t>>> futures;
-        futures.reserve(num_chunks);
+        std::vector<std::vector<uint8_t>> chunk_outputs(num_chunks);
+        std::atomic<size_t> next_chunk{0};
 
-        for (size_t i = 0; i < num_chunks; ++i) {
-            size_t chunk_start = i * CHUNK_SIZE;
-            size_t chunk_len   = std::min(CHUNK_SIZE, len - chunk_start);
-            bool   is_final    = (i == num_chunks - 1);
+        size_t num_threads = std::max(1u, std::thread::hardware_concurrency());
+        num_threads = std::min(num_threads, num_chunks);
 
-            futures.push_back(std::async(std::launch::async,
-                [data, chunk_start, chunk_len, is_final]() {
-                    return DeflateCompressor::compress_block(
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads);
+        for (size_t t = 0; t < num_threads; ++t) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    size_t i = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= num_chunks) break;
+                    size_t chunk_start = i * CHUNK_SIZE;
+                    size_t chunk_len   = std::min(CHUNK_SIZE, len - chunk_start);
+                    bool   is_final    = (i == num_chunks - 1);
+                    chunk_outputs[i]   = DeflateCompressor::compress_block(
                         data + chunk_start, chunk_len, is_final);
-                }));
+                }
+            });
+        }
+        for (auto& w : workers) {
+            if (w.joinable()) w.join();
         }
 
         std::vector<uint8_t> out;
         out.reserve(len);
-        for (size_t i = 0; i < futures.size(); ++i) {
-            auto chunk = futures[i].get();
-            out.insert(out.end(), chunk.begin(), chunk.end());
-            if (i + 1 < futures.size()) {
-                // Non-final parallel chunk: append empty stored block (0x00 0x00 0xFF 0xFF)
-                // to byte-align stream so chunk i+1 starts at a byte boundary (pigz / RFC 1951).
-                out.push_back(0x00);
-                out.push_back(0x00);
-                out.push_back(0xFF);
-                out.push_back(0xFF);
-            }
+        for (size_t i = 0; i < num_chunks; ++i) {
+            out.insert(out.end(), chunk_outputs[i].begin(), chunk_outputs[i].end());
         }
         return out;
     }
