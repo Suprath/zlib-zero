@@ -774,19 +774,36 @@ private:
     // Fixed Huffman decode table: 512 entries, indexed by 9 LSB-first bits.
     // entry.sym = decoded symbol, entry.len = code length consumed.
     // -----------------------------------------------------------------------
-    struct FixedEntry { int sym; int len; };
+    struct FixedEntry {
+        uint16_t val;
+        uint8_t  len;
+        uint8_t  op_extra; // bit 7: is_match, bit 6: is_eob, bits 0-5: extra bits
+    };
 
     static const std::array<FixedEntry, 512>& fixed_ll_table() {
         static std::array<FixedEntry, 512> tbl = []() {
             std::array<FixedEntry, 512> t{};
-            for (auto& e : t) e = { -1, 0 };
+            for (auto& e : t) e = { 0xFFFF, 0, 0 };
 
             auto fill = [&](int sym, int msb_code, int clen) {
                 uint32_t rev_code = rev_bits(static_cast<uint32_t>(msb_code), clen);
+                uint16_t val = 0;
+                uint8_t  op_extra = 0;
+                if (sym < 256) {
+                    val = static_cast<uint16_t>(sym);
+                    op_extra = 0;
+                } else if (sym == 256) {
+                    val = 256;
+                    op_extra = 0x40; // EOB (bit 6)
+                } else {
+                    int li = sym - 257;
+                    val = static_cast<uint16_t>(LENCODES[li].base);
+                    op_extra = 0x80 | static_cast<uint8_t>(LENCODES[li].extra); // Match (bit 7)
+                }
                 int extra = 9 - clen;
                 for (int e = 0; e < (1 << extra); ++e) {
                     uint32_t idx = rev_code | (static_cast<uint32_t>(e) << clen);
-                    t[idx] = { sym, clen };
+                    t[idx] = { val, static_cast<uint8_t>(clen), op_extra };
                 }
             };
 
@@ -799,40 +816,56 @@ private:
         return tbl;
     }
 
+    static const std::array<FixedEntry, 32>& fixed_dist_table() {
+        static std::array<FixedEntry, 32> tbl = []() {
+            std::array<FixedEntry, 32> t{};
+            for (int i = 0; i < 32; ++i) {
+                uint32_t d5 = rev_bits(static_cast<uint32_t>(i), 5);
+                if (d5 < 30) {
+                    t[i] = {
+                        static_cast<uint16_t>(DISTCODES[d5].base),
+                        5,
+                        static_cast<uint8_t>(0x80 | DISTCODES[d5].extra)
+                    };
+                } else {
+                    t[i] = { 0, 5, 0xFF };
+                }
+            }
+            return t;
+        }();
+        return tbl;
+    }
+
     // -----------------------------------------------------------------------
-    // Dynamic Huffman decode table: two-tier structure.
-    //
-    // Concern A fix: replace the 32768-entry flat table (262 KB per block)
-    // with a compact two-tier design:
-    //   Tier 1  — 1024-entry 10-bit fast path (4 KB, L1-cacheable)
-    //   Tier 2  — small overflow vector for codes > 10 bits (typically empty;
-    //              only populated for very skewed distributions)
-    //
-    // Memory: ~4 KB per table, 2 tables per block = ~8 KB vs previous 524 KB.
+    // Dynamic Huffman decode table: fused two-tier structure.
+    // Fuses symbol type, base values, and extra bits directly into 4-byte entries.
+    // Eliminates all secondary lookups into LENCODES and DISTCODES arrays.
     // -----------------------------------------------------------------------
     struct DynTable {
         static constexpr int FAST_BITS = 10;
         static constexpr int FAST_SIZE = 1 << FAST_BITS;  // 1024
 
         struct Entry {
-            int16_t sym;  // decoded symbol; -1 = invalid slot
-            uint8_t len;  // consumed bits (0 = invalid)
-            uint8_t _pad;
+            uint16_t val;      // literal symbol (0-255), EOB (256), or base length/distance
+            uint8_t  len;      // code length consumed (1-10 bits; 0 = invalid)
+            uint8_t  op_extra; // bit 7: is_match, bit 6: is_eob, bits 0-5: extra bits to read
         };
 
         std::array<Entry, FAST_SIZE> fast;  // 4 KB — fits in L1 cache
 
-        struct SlowEntry {          // for codes longer than FAST_BITS
-            uint16_t rev_code;      // LSB-first bit pattern
-            uint8_t  len;           // code length in bits
-            int16_t  sym;
+        struct SlowEntry {
+            uint16_t rev_code;
+            uint8_t  len;
+            uint8_t  op_extra;
+            uint16_t val;
         };
-        std::vector<SlowEntry> slow;  // typically empty; linear-scanned (rare path)
+        std::vector<SlowEntry> slow;
 
-        DynTable() { fast.fill({ -1, 0, 0 }); }
+        DynTable() { fast.fill({ 0xFFFF, 0, 0 }); }
     };
 
-    static DynTable build_dyn_table(const std::vector<int>& lengths, int n) {
+    static DynTable build_dyn_table(const std::vector<int>& lengths, int n, int mode = 0) {
+        // mode 0: code lengths, mode 1: literals/lengths, mode 2: distances
         DynTable tbl;
 
         std::array<int, 16> count{};
@@ -851,97 +884,103 @@ private:
             uint32_t c     = next_code[clen]++;
             uint32_t rev_c = rev_bits(c, clen);
 
+            uint16_t val = 0;
+            uint8_t  op_extra = 0;
+            if (mode == 0) {
+                val = static_cast<uint16_t>(i);
+                op_extra = 0;
+            } else if (mode == 1) {
+                if (i < 256) {
+                    val = static_cast<uint16_t>(i);
+                    op_extra = 0; // Literal
+                } else if (i == 256) {
+                    val = 256;
+                    op_extra = 0x40; // EOB (bit 6)
+                } else {
+                    int li = i - 257;
+                    if (li < 29) {
+                        val = static_cast<uint16_t>(LENCODES[li].base);
+                        op_extra = 0x80 | static_cast<uint8_t>(LENCODES[li].extra); // Match (bit 7)
+                    }
+                }
+            } else {
+                if (i < 30) {
+                    val = static_cast<uint16_t>(DISTCODES[i].base);
+                    op_extra = 0x80 | static_cast<uint8_t>(DISTCODES[i].extra); // Distance
+                }
+            }
+
             if (clen <= DynTable::FAST_BITS) {
-                // Fill all matching fast-table entries (fan-out for shorter codes)
                 int fill_n = DynTable::FAST_BITS - clen;
                 for (int e = 0; e < (1 << fill_n); ++e) {
                     uint32_t idx = rev_c | (static_cast<uint32_t>(e) << clen);
-                    tbl.fast[idx] = {
-                        static_cast<int16_t>(i),
-                        static_cast<uint8_t>(clen),
-                        0
-                    };
+                    tbl.fast[idx] = { val, static_cast<uint8_t>(clen), op_extra };
                 }
             } else {
-                // Overflow: store in slow list (O(n) scan, but rare in practice)
                 tbl.slow.push_back({
                     static_cast<uint16_t>(rev_c),
                     static_cast<uint8_t>(clen),
-                    static_cast<int16_t>(i)
+                    op_extra,
+                    val
                 });
             }
         }
         return tbl;
     }
 
-    struct FastOutBuffer {
-        uint8_t* buf = nullptr;
-        size_t capacity = 0;
-        size_t pos = 0;
+private:
+    struct FixedBufferGrower {
+        uint8_t* dst_start;
+        uint8_t* dst;
+        uint8_t* dst_end;
+        bool out_of_space = false;
 
-        explicit FastOutBuffer(size_t initial_cap) {
-            capacity = std::max(initial_cap, size_t(65536));
-            buf = static_cast<uint8_t*>(std::malloc(capacity));
-            if (!buf) throw std::bad_alloc();
-        }
+        FixedBufferGrower(uint8_t* start, size_t cap)
+            : dst_start(start), dst(start), dst_end(start + cap) {}
 
-        ~FastOutBuffer() {
-            if (buf) std::free(buf);
-        }
-
-        FastOutBuffer(const FastOutBuffer&) = delete;
-        FastOutBuffer& operator=(const FastOutBuffer&) = delete;
-
-        inline void ensure(size_t extra) {
-            if (pos + extra > capacity) {
-                size_t new_cap = std::max(capacity * 2, pos + extra + 65536);
-                uint8_t* nb = static_cast<uint8_t*>(std::realloc(buf, new_cap));
-                if (!nb) throw std::bad_alloc();
-                buf = nb;
-                capacity = new_cap;
+        inline bool ensure(size_t needed) {
+            if (dst + needed > dst_end) {
+                out_of_space = true;
+                return false;
             }
+            return true;
         }
+
+        inline size_t size() const { return static_cast<size_t>(dst - dst_start); }
     };
 
-public:
-    /**
-     * @brief Decompress a raw DEFLATE stream (no zlib header/trailer).
-     * @param hint_len  Expected output size (optional, for reserve).
-     * @return Decompressed bytes.  Returns partial output on error (no silent padding).
-     *
-     * Formally verified by Lean 4 (ZlibZero.Inflate.FlatBuffer):
-     * The bulk capacity guard (bulk_guard_safe_literal and bulk_guard_safe_match)
-     * proves that testing capacity once per symbol loop (dst + 300 >= dst_end)
-     * guarantees bounds safety for literal stores and SIMD 16-byte chunk copies,
-     * completely eliminating std::vector::push_back bounds checks and std::vector::resize
-     * zero-fill memory bandwidth overhead.
-     */
-    static std::vector<uint8_t> decompress_raw(const uint8_t* data, size_t len,
-                                                size_t hint_len = 0) {
-        if (data == nullptr || len == 0) return {};
+    struct DynamicVectorGrower {
+        std::vector<uint8_t>& vec;
+        uint8_t* dst_start;
+        uint8_t* dst;
+        uint8_t* dst_end;
+        bool out_of_space = false;
 
-        size_t init_cap = hint_len > 0 ? hint_len : std::max(len * 4, size_t(128 * 1024));
-        FastOutBuffer out_buf(init_cap + 512);
+        DynamicVectorGrower(std::vector<uint8_t>& v, size_t init_cap) : vec(v) {
+            vec.resize(std::max(init_cap, size_t(65536)));
+            dst_start = vec.data();
+            dst = dst_start;
+            dst_end = dst_start + vec.size();
+        }
 
-        uint8_t* dst_start = out_buf.buf;
-        uint8_t* dst = dst_start;
-        uint8_t* dst_end = dst_start + out_buf.capacity;
+        inline bool ensure(size_t needed) {
+            size_t pos = static_cast<size_t>(dst - dst_start);
+            if (pos + needed > vec.size()) {
+                size_t new_cap = std::max(vec.size() * 2, pos + needed + 65536);
+                vec.resize(new_cap);
+                dst_start = vec.data();
+                dst = dst_start + pos;
+                dst_end = dst_start + vec.size();
+            }
+            return true;
+        }
 
-        auto ensure_capacity = [&](size_t needed) {
-            size_t current_pos = static_cast<size_t>(dst - dst_start);
-            out_buf.pos = current_pos;
-            out_buf.ensure(needed);
-            dst_start = out_buf.buf;
-            dst = dst_start + current_pos;
-            dst_end = dst_start + out_buf.capacity;
-        };
+        inline size_t size() const { return static_cast<size_t>(dst - dst_start); }
+    };
 
-        auto return_output = [&]() -> std::vector<uint8_t> {
-            size_t final_sz = static_cast<size_t>(dst - dst_start);
-            std::vector<uint8_t> out(final_sz);
-            if (final_sz > 0) std::memcpy(out.data(), dst_start, final_sz);
-            return out;
-        };
+    template <typename Grower>
+    static bool decompress_raw_core(Grower& g, const uint8_t* data, size_t len) {
+        if (data == nullptr || len == 0) return true;
 
         size_t   byte_pos = 0;
         uint64_t bit_buf  = 0;
@@ -965,7 +1004,7 @@ public:
         };
 
         auto read_bits = [&](int n) -> uint32_t {
-            if (bit_cnt < n) refill();
+            if (__builtin_expect(bit_cnt < n, 0)) refill();
             uint32_t val = static_cast<uint32_t>(bit_buf & ((1ull << n) - 1));
             bit_buf >>= n;
             bit_cnt  -= n;
@@ -978,6 +1017,7 @@ public:
         };
 
         const auto& fll = fixed_ll_table();
+        const auto& fdist = fixed_dist_table();
 
         bool last_block = false;
         while (!last_block) {
@@ -993,89 +1033,91 @@ public:
                 byte_align();
                 uint32_t blen  = read_bits(8) | (read_bits(8) << 8);
                 uint32_t nblen = read_bits(8) | (read_bits(8) << 8);
-                if ((blen ^ nblen) != 0xFFFFu) return return_output(); // Corrupt
+                if ((blen ^ nblen) != 0xFFFFu) return false; // Corrupt
 
-                if (dst + blen + 300 >= dst_end) {
-                    ensure_capacity(blen + 65536);
-                }
+                if (!g.ensure(blen)) return false;
 
                 for (uint32_t i = 0; i < blen; ++i) {
-                    if (byte_pos >= len && bit_cnt < 8) return return_output(); // Truncated
-                    *dst++ = static_cast<uint8_t>(read_bits(8));
+                    if (byte_pos >= len && bit_cnt < 8) return false; // Truncated
+                    *g.dst++ = static_cast<uint8_t>(read_bits(8));
                 }
 
             // ----------------------------------------------------------------
             } else if (btype == 1) {
                 // Fixed Huffman block
                 while (true) {
-                    // Formally verified bulk capacity guard (Lean 4 FlatBuffer.HasBulkCapacity):
-                    // Checking (dst + 300 >= dst_end) once guarantees literal write, match write,
-                    // and SIMD 16-byte chunk copy are strictly in-bounds without inner checks.
-                    if (__builtin_expect(dst + 300 >= dst_end, 0)) {
-                        ensure_capacity(65536);
+                    bool in_tail = false;
+                    if (__builtin_expect(g.dst + 300 >= g.dst_end, 0)) {
+                        if (!g.ensure(300)) in_tail = true;
                     }
 
-                    if (bit_cnt < 15) refill();
-                    uint32_t peek = bit_buf & 0x1FFu;
-                    const FixedEntry& fe = fll[peek];
-                    if (__builtin_expect(fe.sym < 0 || fe.len <= 0, 0)) return return_output(); // Error
-
+                    if (__builtin_expect(bit_cnt < 15, 0)) refill();
+                    const auto& fe = fll[bit_buf & 0x1FF];
                     bit_buf >>= fe.len;
                     bit_cnt  -= fe.len;
-                    int sym = fe.sym;
 
-                    if (sym < 256) {
-                        *dst++ = static_cast<uint8_t>(sym);
-                    } else if (sym == 256) {
+                    if (__builtin_expect(fe.op_extra == 0, 1)) {
+                        if (in_tail && !g.ensure(1)) return false;
+                        *g.dst++ = static_cast<uint8_t>(fe.val);
+                    } else if (__builtin_expect(fe.op_extra == 0x40, 0)) {
                         break; // EOB
                     } else {
-                        // Length code → read extra bits
-                        int li = sym - 257;
-                        if (__builtin_expect(li < 0 || li >= 29, 0)) return return_output();
-                        const auto& lc = LENCODES[li];
-                        int length = lc.base + (lc.extra > 0 ? static_cast<int>(read_bits(lc.extra)) : 0);
-
-                        // Distance code: 5-bit MSB-first (reversed for LSB-first stream)
-                        uint32_t d5bits = read_bits(5);
-                        int dist_code = static_cast<int>(rev_bits(d5bits, 5));
-                        if (__builtin_expect(dist_code < 0 || dist_code >= 30, 0)) return return_output();
-                        const auto& dc = DISTCODES[dist_code];
-                        int distance = dc.base + (dc.extra > 0 ? static_cast<int>(read_bits(dc.extra)) : 0);
-
-                        size_t current_pos = static_cast<size_t>(dst - dst_start);
-                        if (__builtin_expect(distance <= 0 || static_cast<size_t>(distance) > current_pos, 0)) {
-                            return return_output(); // Illegal back-ref
+                        int length = fe.val;
+                        int extra = fe.op_extra & 0x3F;
+                        if (extra > 0) {
+                            if (__builtin_expect(bit_cnt < extra, 0)) refill();
+                            length += static_cast<int>(bit_buf & ((1u << extra) - 1));
+                            bit_buf >>= extra;
+                            bit_cnt  -= extra;
                         }
 
-                        const uint8_t* src = dst - distance;
-                        if (distance == 1) {
-                            std::memset(dst, *src, length);
-                            dst += length;
+                        if (__builtin_expect(bit_cnt < 15, 0)) refill();
+                        const auto& fde = fdist[bit_buf & 0x1F];
+                        bit_buf >>= fde.len;
+                        bit_cnt  -= fde.len;
+
+                        int distance = fde.val;
+                        int d_extra = fde.op_extra & 0x3F;
+                        if (d_extra > 0) {
+                            if (__builtin_expect(bit_cnt < d_extra, 0)) refill();
+                            distance += static_cast<int>(bit_buf & ((1u << d_extra) - 1));
+                            bit_buf >>= d_extra;
+                            bit_cnt  -= d_extra;
+                        }
+
+                        size_t current_pos = static_cast<size_t>(g.dst - g.dst_start);
+                        if (__builtin_expect(distance <= 0 || static_cast<size_t>(distance) > current_pos, 0)) {
+                            return false; // Illegal back-ref
+                        }
+
+                        if (in_tail && !g.ensure(length)) return false;
+
+                        const uint8_t* src = g.dst - distance;
+                        if (in_tail) {
+                            for (int k = 0; k < length; ++k) *g.dst++ = *src++;
+                        } else if (distance == 1) {
+                            std::memset(g.dst, *src, length);
+                            g.dst += length;
                         } else if (distance >= 32) {
-                            uint8_t* match_end = dst + length;
-                            while (dst + 32 <= match_end) {
-                                std::memcpy(dst, src, 32);
-                                dst += 32;
-                                src += 32;
+                            uint8_t* match_end = g.dst + length;
+                            while (g.dst + 32 <= match_end) {
+                                std::memcpy(g.dst, src, 32);
+                                g.dst += 32; src += 32;
                             }
-                            while (dst < match_end) {
-                                std::memcpy(dst, src, 16);
-                                dst += 16;
-                                src += 16;
+                            while (g.dst < match_end) {
+                                std::memcpy(g.dst, src, 16);
+                                g.dst += 16; src += 16;
                             }
-                            dst = match_end;
+                            g.dst = match_end;
                         } else if (distance >= 16) {
-                            uint8_t* match_end = dst + length;
-                            while (dst < match_end) {
-                                std::memcpy(dst, src, 16);
-                                dst += 16;
-                                src += 16;
+                            uint8_t* match_end = g.dst + length;
+                            while (g.dst < match_end) {
+                                std::memcpy(g.dst, src, 16);
+                                g.dst += 16; src += 16;
                             }
-                            dst = match_end;
+                            g.dst = match_end;
                         } else {
-                            for (int k = 0; k < length; ++k) {
-                                *dst++ = *src++;
-                            }
+                            for (int k = 0; k < length; ++k) *g.dst++ = *src++;
                         }
                     }
                 }
@@ -1094,24 +1136,22 @@ public:
                 for (int i = 0; i < hclen; ++i)
                     cl_lengths[HCLEN_ORDER[i]] = static_cast<int>(read_bits(3));
 
-                auto cl_tbl = build_dyn_table(cl_lengths, 19);
+                auto cl_tbl = build_dyn_table(cl_lengths, 19, 0);
 
-                // Decode hlit + hdist code lengths using code-length alphabet
                 auto decode_cl = [&]() -> int {
-                    if (bit_cnt < DynTable::FAST_BITS) refill();
-                    uint32_t fast_idx = bit_buf & (DynTable::FAST_SIZE - 1);
-                    const DynTable::Entry& fe = cl_tbl.fast[fast_idx];
+                    if (__builtin_expect(bit_cnt < 10, 0)) refill();
+                    uint32_t fast_idx = bit_buf & 1023;
+                    const auto& fe = cl_tbl.fast[fast_idx];
                     if (fe.len > 0) {
                         bit_buf >>= fe.len;
                         bit_cnt  -= fe.len;
-                        return fe.sym;
+                        return fe.val;
                     }
-                    // Slow path: linear scan of overflow entries
                     for (const auto& se : cl_tbl.slow) {
                         if ((bit_buf & ((1u << se.len) - 1)) == se.rev_code) {
                             bit_buf >>= se.len;
                             bit_cnt  -= se.len;
-                            return se.sym;
+                            return se.val;
                         }
                     }
                     return -1;
@@ -1121,7 +1161,7 @@ public:
                 all_lens.reserve(hlit + hdist);
                 while (static_cast<int>(all_lens.size()) < hlit + hdist) {
                     int sym = decode_cl();
-                    if (sym < 0) return return_output(); // Error
+                    if (sym < 0) return false;
                     if (sym < 16) {
                         all_lens.push_back(sym);
                     } else if (sym == 16) {
@@ -1145,98 +1185,146 @@ public:
                     if (j < static_cast<int>(all_lens.size())) dist_lens[i] = all_lens[j];
                 }
 
-                auto ll_tbl   = build_dyn_table(ll_lens,   286);
-                auto dist_tbl = build_dyn_table(dist_lens,  30);
+                auto ll_tbl   = build_dyn_table(ll_lens,   286, 1);
+                auto dist_tbl = build_dyn_table(dist_lens,  30, 2);
 
-                auto decode_sym = [&](const DynTable& tbl) -> int {
-                    if (bit_cnt < 15) refill();
-                    uint32_t fast_idx = bit_buf & (DynTable::FAST_SIZE - 1);
-                    const DynTable::Entry& fe = tbl.fast[fast_idx];
+                auto decode_fused = [&](const DynTable& tbl) -> DynTable::Entry {
+                    if (__builtin_expect(bit_cnt < 15, 0)) refill();
+                    uint32_t fast_idx = bit_buf & 1023;
+                    const auto& fe = tbl.fast[fast_idx];
                     if (__builtin_expect(fe.len > 0, 1)) {
                         bit_buf >>= fe.len;
                         bit_cnt  -= fe.len;
-                        return fe.sym;
+                        return fe;
                     }
-                    // Slow path: linear scan (rare — only for codes > 10 bits)
                     for (const auto& se : tbl.slow) {
                         if ((bit_buf & ((1u << se.len) - 1)) == se.rev_code) {
                             bit_buf >>= se.len;
                             bit_cnt  -= se.len;
-                            return se.sym;
+                            return { se.val, se.len, se.op_extra };
                         }
                     }
-                    return -1;
+                    return { 0xFFFF, 0, 0xFF };
                 };
 
                 while (true) {
-                    // Formally verified bulk capacity guard (Lean 4 FlatBuffer.HasBulkCapacity):
-                    // Checking (dst + 300 >= dst_end) once guarantees literal write, match write,
-                    // and SIMD 16-byte chunk copy are strictly in-bounds without inner checks.
-                    if (__builtin_expect(dst + 300 >= dst_end, 0)) {
-                        ensure_capacity(65536);
+                    bool in_tail = false;
+                    if (__builtin_expect(g.dst + 300 >= g.dst_end, 0)) {
+                        if (!g.ensure(300)) in_tail = true;
                     }
 
-                    int sym = decode_sym(ll_tbl);
-                    if (__builtin_expect(sym < 0, 0)) return return_output();
-                    if (sym < 256) {
-                        *dst++ = static_cast<uint8_t>(sym);
-                    } else if (sym == 256) {
+                    DynTable::Entry fe = decode_fused(ll_tbl);
+                    if (__builtin_expect(fe.len == 0, 0)) return false;
+
+                    if (__builtin_expect(fe.op_extra == 0, 1)) {
+                        if (in_tail && !g.ensure(1)) return false;
+                        *g.dst++ = static_cast<uint8_t>(fe.val);
+                    } else if (__builtin_expect(fe.op_extra == 0x40, 0)) {
                         break; // EOB
                     } else {
-                        int li = sym - 257;
-                        if (__builtin_expect(li < 0 || li >= 29, 0)) return return_output();
-                        const auto& lc = LENCODES[li];
-                        int length = lc.base + (lc.extra > 0 ? static_cast<int>(read_bits(lc.extra)) : 0);
-
-                        int dist_sym = decode_sym(dist_tbl);
-                        if (__builtin_expect(dist_sym < 0 || dist_sym >= 30, 0)) return return_output();
-                        const auto& dc = DISTCODES[dist_sym];
-                        int distance = dc.base + (dc.extra > 0 ? static_cast<int>(read_bits(dc.extra)) : 0);
-
-                        size_t current_pos = static_cast<size_t>(dst - dst_start);
-                        if (__builtin_expect(distance <= 0 || static_cast<size_t>(distance) > current_pos, 0)) {
-                            return return_output();
+                        int length = fe.val;
+                        int extra = fe.op_extra & 0x3F;
+                        if (extra > 0) {
+                            if (__builtin_expect(bit_cnt < extra, 0)) refill();
+                            length += static_cast<int>(bit_buf & ((1u << extra) - 1));
+                            bit_buf >>= extra;
+                            bit_cnt  -= extra;
                         }
 
-                        const uint8_t* src = dst - distance;
-                        if (distance == 1) {
-                            std::memset(dst, *src, length);
-                            dst += length;
+                        DynTable::Entry de = decode_fused(dist_tbl);
+                        if (__builtin_expect(de.len == 0, 0)) return false;
+
+                        int distance = de.val;
+                        int d_extra = de.op_extra & 0x3F;
+                        if (d_extra > 0) {
+                            if (__builtin_expect(bit_cnt < d_extra, 0)) refill();
+                            distance += static_cast<int>(bit_buf & ((1u << d_extra) - 1));
+                            bit_buf >>= d_extra;
+                            bit_cnt  -= d_extra;
+                        }
+
+                        size_t current_pos = static_cast<size_t>(g.dst - g.dst_start);
+                        if (__builtin_expect(distance <= 0 || static_cast<size_t>(distance) > current_pos, 0)) {
+                            return false; // Illegal back-ref
+                        }
+
+                        if (in_tail && !g.ensure(length)) return false;
+
+                        const uint8_t* src = g.dst - distance;
+                        if (in_tail) {
+                            for (int k = 0; k < length; ++k) *g.dst++ = *src++;
+                        } else if (distance == 1) {
+                            std::memset(g.dst, *src, length);
+                            g.dst += length;
                         } else if (distance >= 32) {
-                            uint8_t* match_end = dst + length;
-                            while (dst + 32 <= match_end) {
-                                std::memcpy(dst, src, 32);
-                                dst += 32;
-                                src += 32;
+                            uint8_t* match_end = g.dst + length;
+                            while (g.dst + 32 <= match_end) {
+                                std::memcpy(g.dst, src, 32);
+                                g.dst += 32; src += 32;
                             }
-                            while (dst < match_end) {
-                                std::memcpy(dst, src, 16);
-                                dst += 16;
-                                src += 16;
+                            while (g.dst < match_end) {
+                                std::memcpy(g.dst, src, 16);
+                                g.dst += 16; src += 16;
                             }
-                            dst = match_end;
+                            g.dst = match_end;
                         } else if (distance >= 16) {
-                            uint8_t* match_end = dst + length;
-                            while (dst < match_end) {
-                                std::memcpy(dst, src, 16);
-                                dst += 16;
-                                src += 16;
+                            uint8_t* match_end = g.dst + length;
+                            while (g.dst < match_end) {
+                                std::memcpy(g.dst, src, 16);
+                                g.dst += 16; src += 16;
                             }
-                            dst = match_end;
+                            g.dst = match_end;
                         } else {
-                            for (int k = 0; k < length; ++k) {
-                                *dst++ = *src++;
-                            }
+                            for (int k = 0; k < length; ++k) *g.dst++ = *src++;
                         }
                     }
                 }
-
             } else {
-                return return_output(); // BTYPE=11: reserved / error
+                return false; // BTYPE=11: reserved / error
             }
         }
 
-        return return_output();
+        return true;
+    }
+
+public:
+    /**
+     * @brief Decompress a raw DEFLATE stream directly into caller-provided buffer (Zero-Copy).
+     * @param dst_start   Destination buffer pointer
+     * @param max_cap     Maximum capacity of dst_start in bytes
+     * @param data        Compressed DEFLATE payload
+     * @param len         Length of compressed data in bytes
+     * @param out_of_space Optional out-parameter set to true if destination buffer was too small
+     * @return Number of uncompressed bytes written, or 0 on error / out of space.
+     */
+    static size_t decompress_raw_into(uint8_t* dst_start, size_t max_cap,
+                                      const uint8_t* data, size_t len,
+                                      bool* out_of_space = nullptr) {
+        if (out_of_space) *out_of_space = false;
+        if (data == nullptr || len == 0 || dst_start == nullptr || max_cap == 0) return 0;
+
+        FixedBufferGrower grower(dst_start, max_cap);
+        bool ok = decompress_raw_core(grower, data, len);
+        if (out_of_space) *out_of_space = grower.out_of_space;
+        return ok ? grower.size() : 0;
+    }
+
+    /**
+     * @brief Decompress a raw DEFLATE stream (no zlib header/trailer).
+     * @param hint_len  Expected output size (optional, for reserve).
+     * @return Decompressed bytes. Returns empty output on error.
+     */
+    static std::vector<uint8_t> decompress_raw(const uint8_t* data, size_t len,
+                                                size_t hint_len = 0) {
+        if (data == nullptr || len == 0) return {};
+
+        std::vector<uint8_t> out;
+        size_t init_cap = hint_len > 0 ? hint_len : std::max(len * 4, size_t(128 * 1024));
+        DynamicVectorGrower grower(out, init_cap);
+        bool ok = decompress_raw_core(grower, data, len);
+        if (!ok) return {};
+        out.resize(grower.size());
+        return out;
     }
 };
 
@@ -1287,7 +1375,45 @@ inline std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len) {
  * do not misparse them as compressed payload — previously this would
  * silently corrupt the output.
  */
-inline std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len) {
+/**
+ * @brief Decompress RFC 1950 zlib stream directly into caller buffer (Zero-Copy).
+ * Returns number of uncompressed bytes, or 0 on error / checksum mismatch.
+ */
+inline size_t decompress_zlib_into(uint8_t* dst, size_t max_cap, const uint8_t* data, size_t len) {
+    if (len < 6 || dst == nullptr || max_cap == 0) return 0;
+
+    // Validate CMF/FLG header checksum (must be divisible by 31)
+    uint32_t header = (static_cast<uint32_t>(data[0]) << 8) | data[1];
+    if (header % 31 != 0) return 0;
+
+    // Check CM field (must be 8 = deflate)
+    if ((data[0] & 0x0F) != 8) return 0;
+
+    const bool   has_dict      = (data[1] & 0x20) != 0;
+    const size_t payload_start = 2u + (has_dict ? 4u : 0u);
+    const size_t trailer_size  = 4u;
+
+    if (len < payload_start + trailer_size + 1u) return 0;
+    const size_t payload_len = len - payload_start - trailer_size;
+
+    size_t decompressed_sz = InflateDecompressor::decompress_raw_into(
+        dst, max_cap, data + payload_start, payload_len);
+
+    if (decompressed_sz == 0 && payload_len > 0) return 0;
+
+    // Verify Adler-32 trailer
+    uint32_t stored_adler =
+        (static_cast<uint32_t>(data[len-4]) << 24) |
+        (static_cast<uint32_t>(data[len-3]) << 16) |
+        (static_cast<uint32_t>(data[len-2]) <<  8) |
+         static_cast<uint32_t>(data[len-1]);
+    uint32_t calc_adler = adler32_modernized(1, dst, decompressed_sz);
+    if (stored_adler != calc_adler) return 0;
+
+    return decompressed_sz;
+}
+
+inline std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len, size_t hint_len) {
     if (len < 6) return {};
 
     // Validate CMF/FLG header checksum (must be divisible by 31)
@@ -1309,7 +1435,7 @@ inline std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len) {
     const size_t payload_len = len - payload_start - trailer_size;
 
     // Decompress the DEFLATE payload
-    auto result = InflateDecompressor::decompress_raw(data + payload_start, payload_len);
+    auto result = InflateDecompressor::decompress_raw(data + payload_start, payload_len, hint_len);
 
     // Verify Adler-32 trailer
     uint32_t stored_adler =
@@ -1321,6 +1447,10 @@ inline std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len) {
     if (stored_adler != calc_adler) return {}; // Integrity failure
 
     return result;
+}
+
+inline std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len) {
+    return decompress_zlib(data, len, 0);
 }
 
 
