@@ -9,7 +9,7 @@ static PyObject* py_compress_zlib(PyObject* self, PyObject* args) {
         return NULL;
     }
     auto out = ModernizedZlib::compress_zlib(
-        static_cast<const uint8_t*>(buf.buf), buf.len);
+        static_cast<const uint8_t*>(buf.buf), buf.len, level);
     PyBuffer_Release(&buf);
     return PyBytes_FromStringAndSize(reinterpret_cast<const char*>(out.data()), out.size());
 }

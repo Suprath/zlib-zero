@@ -198,7 +198,7 @@ public:
      *                  false → BFINAL=0 (more blocks follow; pigz-style parallel).
      */
     static std::vector<uint8_t> compress_block(const uint8_t* data, size_t len,
-                                                bool is_final = true) {
+                                                bool is_final = true, int level = 6) {
         std::vector<uint8_t> out;
         out.reserve(len + 64);
         BitWriter bw(out);
@@ -213,69 +213,110 @@ public:
             return out;
         }
 
+        int limit = 32;
+        if (level <= 1) limit = 4;
+        else if (level <= 3) limit = 16;
+        else if (level <= 5) limit = 32;
+        else if (level <= 7) limit = 128;
+        else limit = 258;
+
+        const bool lazy = (level >= 6);
+
         // LZ77 hash chaining
         constexpr size_t HASH_BITS = 15;
         constexpr size_t HASH_SIZE = 1u << HASH_BITS;
         std::vector<int32_t> head(HASH_SIZE, -1);
         std::vector<int32_t> prev(WINDOW_SIZE, -1);
 
+        auto insert_hash = [&](size_t p) {
+            if (p + 2 < len) {
+                uint32_t h = ((static_cast<uint32_t>(data[p])     << 10) ^
+                              (static_cast<uint32_t>(data[p + 1]) <<  5) ^
+                               static_cast<uint32_t>(data[p + 2])) & (HASH_SIZE - 1);
+                int32_t slot = static_cast<int32_t>(p & (WINDOW_SIZE - 1));
+                prev[slot] = head[h];
+                head[h]    = static_cast<int32_t>(p);
+            }
+        };
+
+        auto find_match = [&](size_t p, size_t& best_len, size_t& best_dist) {
+            best_len = 0;
+            best_dist = 0;
+            if (p + 3 > len) return;
+            uint32_t h = ((static_cast<uint32_t>(data[p])     << 10) ^
+                          (static_cast<uint32_t>(data[p + 1]) <<  5) ^
+                           static_cast<uint32_t>(data[p + 2])) & (HASH_SIZE - 1);
+            int32_t curr = head[h];
+            insert_hash(p);
+            int cur_limit = limit;
+            while (curr != -1 && cur_limit-- > 0) {
+                int32_t dist_i = static_cast<int32_t>(p) - curr;
+                if (dist_i <= 0 || dist_i > static_cast<int32_t>(WINDOW_SIZE)) break;
+                size_t dist = static_cast<size_t>(dist_i);
+                size_t mlen = longest_match_fast(data + p - dist, data + p, len - p);
+                if (mlen >= MIN_MATCH && mlen > best_len) {
+                    best_len  = mlen;
+                    best_dist = dist;
+                    if (best_len >= 258) break;
+                }
+                curr = prev[curr & (WINDOW_SIZE - 1)];
+            }
+        };
+
         size_t pos = 0;
+        size_t prev_len = 0;
+        size_t prev_dist = 0;
+        bool match_avail = false;
+
         while (pos < len) {
-            // Not enough bytes for a 3-byte trigger: emit literals
             if (pos + 3 > len) {
+                if (match_avail) {
+                    bw.send_back_ref(prev_len, prev_dist);
+                    pos += (prev_len - 1);
+                    match_avail = false;
+                }
                 while (pos < len) bw.send_fixed_sym(static_cast<int>(data[pos++]));
                 break;
             }
 
-            // Hash of the 3-byte trigger at current position
-            uint32_t h = ((static_cast<uint32_t>(data[pos])     << 10) ^
-                          (static_cast<uint32_t>(data[pos + 1]) <<  5) ^
-                           static_cast<uint32_t>(data[pos + 2])) & (HASH_SIZE - 1);
+            size_t curr_len = 0, curr_dist = 0;
+            find_match(pos, curr_len, curr_dist);
 
-            int32_t  chain_head = head[h];
-            int32_t  match_slot = static_cast<int32_t>(pos & (WINDOW_SIZE - 1));
-            head[h]             = static_cast<int32_t>(pos);
-            prev[match_slot]    = chain_head;
-
-            // Walk hash chain looking for longest match
-            size_t  best_len  = 0;
-            size_t  best_dist = 0;
-            int32_t curr      = chain_head;
-            int     limit     = 32; // chain depth limit
-
-            while (curr != -1 && limit-- > 0) {
-                int32_t dist_i = static_cast<int32_t>(pos) - curr;
-                if (dist_i <= 0 || dist_i > static_cast<int32_t>(WINDOW_SIZE)) break;
-                size_t dist = static_cast<size_t>(dist_i);
-
-                size_t abs_src = pos - dist;
-                size_t mlen = longest_match_fast(data + abs_src, data + pos, len - pos);
-
-                if (mlen >= MIN_MATCH && mlen > best_len) {
-                    best_len  = mlen;
-                    best_dist = dist;
-                    if (best_len >= 258) break; // max match: no need to search further
+            if (!lazy) {
+                if (curr_len >= MIN_MATCH && curr_dist > 0) {
+                    bw.send_back_ref(curr_len, curr_dist);
+                    for (size_t k = 1; k < curr_len; ++k) insert_hash(pos + k);
+                    pos += curr_len;
+                } else {
+                    bw.send_fixed_sym(static_cast<int>(data[pos++]));
                 }
-                curr = prev[curr & (WINDOW_SIZE - 1)];
-            }
-
-            if (best_len >= MIN_MATCH && best_dist > 0) {
-                // Emit RFC 1951 back-reference tuple
-                bw.send_back_ref(best_len, best_dist);
-                // Update hash entries for the matched bytes
-                for (size_t k = 1; k < best_len && (pos + k + 2) < len; ++k) {
-                    size_t p = pos + k;
-                    uint32_t hk = ((static_cast<uint32_t>(data[p])     << 10) ^
-                                   (static_cast<uint32_t>(data[p + 1]) <<  5) ^
-                                    static_cast<uint32_t>(data[p + 2])) & (HASH_SIZE - 1);
-                    int32_t slot_k = static_cast<int32_t>(p & (WINDOW_SIZE - 1));
-                    prev[slot_k] = head[hk];
-                    head[hk]     = static_cast<int32_t>(p);
-                }
-                pos += best_len;
             } else {
-                bw.send_fixed_sym(static_cast<int>(data[pos++]));
+                if (match_avail) {
+                    if (curr_len > prev_len) {
+                        bw.send_fixed_sym(static_cast<int>(data[pos - 1]));
+                        prev_len = curr_len;
+                        prev_dist = curr_dist;
+                        pos++;
+                    } else {
+                        bw.send_back_ref(prev_len, prev_dist);
+                        match_avail = false;
+                        for (size_t k = 1; k < prev_len - 1; ++k) insert_hash(pos + k);
+                        pos += (prev_len - 1);
+                    }
+                } else {
+                    if (curr_len >= MIN_MATCH && curr_dist > 0) {
+                        match_avail = true;
+                        prev_len = curr_len;
+                        prev_dist = curr_dist;
+                        pos++;
+                    } else {
+                        bw.send_fixed_sym(static_cast<int>(data[pos++]));
+                    }
+                }
             }
+        }
+        if (match_avail) {
+            bw.send_back_ref(prev_len, prev_dist);
         }
 
         bw.send_fixed_sym(256); // End-Of-Block symbol
@@ -502,7 +543,7 @@ public:
      * @param is_final  true → BFINAL=1 (last block); false → BFINAL=0 (Issue 3 fix).
      */
     static std::vector<uint8_t> compress_dynamic(const uint8_t* data, size_t len,
-                                                  bool is_final = true) {
+                                                  bool is_final = true, int level = 6) {
         if (data == nullptr || len == 0) return {};
 
         // ---- Pass 1: LZ77 tokenisation + frequency counting ----
@@ -519,75 +560,127 @@ public:
         std::array<uint32_t, 30>  d_freq{};
         ll_freq[256] = 1; // EOB
 
+        int limit = 32;
+        if (level <= 1) limit = 4;
+        else if (level <= 3) limit = 16;
+        else if (level <= 5) limit = 32;
+        else if (level <= 7) limit = 128;
+        else limit = 258;
+
+        const bool lazy = (level >= 6);
+
         constexpr size_t HASH_BITS = 15;
         constexpr size_t HASH_SIZE = 1u << HASH_BITS;
         std::vector<int32_t> head(HASH_SIZE, -1);
         std::vector<int32_t> prev_v(WINDOW_SIZE, -1);
 
-        size_t pos = 0;
-        while (pos < len) {
-            if (pos + 3 > len) {
-                while (pos < len) {
-                    ll_freq[data[pos]]++;
-                    tokens.push_back({ data[pos], 0, 0, 0 });
-                    ++pos;
-                }
-                break;
+        auto insert_hash = [&](size_t p) {
+            if (p + 2 < len) {
+                uint32_t h = ((static_cast<uint32_t>(data[p])     << 10) ^
+                              (static_cast<uint32_t>(data[p + 1]) <<  5) ^
+                               static_cast<uint32_t>(data[p + 2])) & (HASH_SIZE - 1);
+                int32_t slot = static_cast<int32_t>(p & (WINDOW_SIZE - 1));
+                prev_v[slot] = head[h];
+                head[h]      = static_cast<int32_t>(p);
             }
+        };
 
-            uint32_t h = ((static_cast<uint32_t>(data[pos])     << 10) ^
-                          (static_cast<uint32_t>(data[pos + 1]) <<  5) ^
-                           static_cast<uint32_t>(data[pos + 2])) & (HASH_SIZE - 1);
+        auto emit_back_ref = [&](size_t mlen, size_t mdist) {
+            int li = LEN_LOOKUP[mlen];
+            int di = find_dist_idx(static_cast<int>(mdist));
+            ll_freq[LENCODES[li].code]++;
+            d_freq[di]++;
+            tokens.push_back({
+                static_cast<uint16_t>(LENCODES[li].code),
+                static_cast<uint16_t>(di),
+                static_cast<uint16_t>(mlen),
+                static_cast<uint32_t>(mdist)
+            });
+        };
 
-            int32_t ch   = head[h];
-            int32_t slot = static_cast<int32_t>(pos & (WINDOW_SIZE - 1));
-            head[h]      = static_cast<int32_t>(pos);
-            prev_v[slot] = ch;
+        auto emit_literal = [&](uint8_t c) {
+            ll_freq[c]++;
+            tokens.push_back({ c, 0, 0, 0 });
+        };
 
-            size_t best_len = 0, best_dist = 0;
-            int32_t curr = ch;
-            int limit = 32;
-
-            while (curr != -1 && limit-- > 0) {
-                int32_t dist_i = static_cast<int32_t>(pos) - curr;
+        auto find_match = [&](size_t p, size_t& best_len, size_t& best_dist) {
+            best_len = 0;
+            best_dist = 0;
+            if (p + 3 > len) return;
+            uint32_t h = ((static_cast<uint32_t>(data[p])     << 10) ^
+                          (static_cast<uint32_t>(data[p + 1]) <<  5) ^
+                           static_cast<uint32_t>(data[p + 2])) & (HASH_SIZE - 1);
+            int32_t curr = head[h];
+            insert_hash(p);
+            int cur_limit = limit;
+            while (curr != -1 && cur_limit-- > 0) {
+                int32_t dist_i = static_cast<int32_t>(p) - curr;
                 if (dist_i <= 0 || dist_i > static_cast<int32_t>(WINDOW_SIZE)) break;
                 size_t dist = static_cast<size_t>(dist_i);
-
-                size_t mlen = longest_match_fast(data + pos - dist, data + pos, len - pos);
+                size_t mlen = longest_match_fast(data + p - dist, data + p, len - p);
                 if (mlen >= MIN_MATCH && mlen > best_len) {
-                    best_len = mlen; best_dist = dist;
+                    best_len = mlen;
+                    best_dist = dist;
                     if (best_len >= 258) break;
                 }
                 curr = prev_v[curr & (WINDOW_SIZE - 1)];
             }
+        };
 
-            if (best_len >= MIN_MATCH && best_dist > 0) {
-                int li = LEN_LOOKUP[best_len];
-                int di = find_dist_idx(static_cast<int>(best_dist));
-                ll_freq[LENCODES[li].code]++;
-                d_freq[di]++;
-                tokens.push_back({
-                    static_cast<uint16_t>(LENCODES[li].code),
-                    static_cast<uint16_t>(di),
-                    static_cast<uint16_t>(best_len),
-                    static_cast<uint16_t>(best_dist)
-                });
-                // Update hashes for matched bytes
-                for (size_t k = 1; k < best_len && pos + k + 2 < len; ++k) {
-                    size_t p = pos + k;
-                    uint32_t hk = ((static_cast<uint32_t>(data[p])     << 10) ^
-                                   (static_cast<uint32_t>(data[p + 1]) <<  5) ^
-                                    static_cast<uint32_t>(data[p + 2])) & (HASH_SIZE - 1);
-                    int32_t sk = static_cast<int32_t>(p & (WINDOW_SIZE - 1));
-                    prev_v[sk] = head[hk];
-                    head[hk]   = static_cast<int32_t>(p);
+        size_t pos = 0;
+        size_t prev_len = 0;
+        size_t prev_dist = 0;
+        bool match_avail = false;
+
+        while (pos < len) {
+            if (pos + 3 > len) {
+                if (match_avail) {
+                    emit_back_ref(prev_len, prev_dist);
+                    pos += (prev_len - 1);
+                    match_avail = false;
                 }
-                pos += best_len;
-            } else {
-                ll_freq[data[pos]]++;
-                tokens.push_back({ data[pos], 0, 0, 0 });
-                ++pos;
+                while (pos < len) emit_literal(data[pos++]);
+                break;
             }
+
+            size_t curr_len = 0, curr_dist = 0;
+            find_match(pos, curr_len, curr_dist);
+
+            if (!lazy) {
+                if (curr_len >= MIN_MATCH && curr_dist > 0) {
+                    emit_back_ref(curr_len, curr_dist);
+                    for (size_t k = 1; k < curr_len; ++k) insert_hash(pos + k);
+                    pos += curr_len;
+                } else {
+                    emit_literal(data[pos++]);
+                }
+            } else {
+                if (match_avail) {
+                    if (curr_len > prev_len) {
+                        emit_literal(data[pos - 1]);
+                        prev_len = curr_len;
+                        prev_dist = curr_dist;
+                        pos++;
+                    } else {
+                        emit_back_ref(prev_len, prev_dist);
+                        match_avail = false;
+                        for (size_t k = 1; k < prev_len - 1; ++k) insert_hash(pos + k);
+                        pos += (prev_len - 1);
+                    }
+                } else {
+                    if (curr_len >= MIN_MATCH && curr_dist > 0) {
+                        match_avail = true;
+                        prev_len = curr_len;
+                        prev_dist = curr_dist;
+                        pos++;
+                    } else {
+                        emit_literal(data[pos++]);
+                    }
+                }
+            }
+        }
+        if (match_avail) {
+            emit_back_ref(prev_len, prev_dist);
         }
         tokens.push_back({ 256, 0, 0, 0 }); // EOB
 
@@ -679,18 +772,18 @@ public:
             }
         }
 
-        bw.flush();
         if (!is_final) {
-            // Sync-flush to byte boundary per RFC 1951 §3.2.4:
-            // Emit empty stored block at byte boundary (5 bytes):
-            // Byte 0: BFINAL=0 (1 bit), BTYPE=00 (2 bits), 00000 padding (5 bits) = 0x00
-            // Bytes 1-2: LEN = 0x0000
-            // Bytes 3-4: NLEN = 0xFFFF
-            out.push_back(0x00);
+            // Non-final parallel chunk: append empty stored block header (BFINAL=0, BTYPE=00)
+            // followed by LEN=0x0000 NLEN=0xFFFF to byte-align stream for next chunk (pigz / RFC 1951 §3.2.4).
+            bw.send(0u, 1); // BFINAL=0
+            bw.send(0u, 2); // BTYPE=00 (stored block)
+            bw.flush();
             out.push_back(0x00);
             out.push_back(0x00);
             out.push_back(0xFF);
             out.push_back(0xFF);
+        } else {
+            bw.flush();
         }
         return out;
     }
@@ -712,11 +805,16 @@ public:
  */
 class ParallelDeflateCompressor {
 public:
-    static std::vector<uint8_t> compress_parallel(const uint8_t* data, size_t len) {
+    static std::vector<uint8_t> compress_parallel(const uint8_t* data, size_t len, int level = 6) {
         if (data == nullptr || len == 0) return {};
 
-        if (len < PARALLEL_THRESHOLD)
-            return DeflateCompressor::compress_block(data, len, /*is_final=*/true);
+        if (len < PARALLEL_THRESHOLD) {
+            if (level >= 6) {
+                return DynamicHuffmanEncoder::compress_dynamic(data, len, /*is_final=*/true, level);
+            } else {
+                return DeflateCompressor::compress_block(data, len, /*is_final=*/true, level);
+            }
+        }
 
         size_t num_chunks = (len + CHUNK_SIZE - 1) / CHUNK_SIZE;
         std::vector<std::vector<uint8_t>> chunk_outputs(num_chunks);
@@ -735,8 +833,13 @@ public:
                     size_t chunk_start = i * CHUNK_SIZE;
                     size_t chunk_len   = std::min(CHUNK_SIZE, len - chunk_start);
                     bool   is_final    = (i == num_chunks - 1);
-                    chunk_outputs[i]   = DeflateCompressor::compress_block(
-                        data + chunk_start, chunk_len, is_final);
+                    if (level >= 6) {
+                        chunk_outputs[i] = DynamicHuffmanEncoder::compress_dynamic(
+                            data + chunk_start, chunk_len, is_final, level);
+                    } else {
+                        chunk_outputs[i] = DeflateCompressor::compress_block(
+                            data + chunk_start, chunk_len, is_final, level);
+                    }
                 }
             });
         }
@@ -846,39 +949,55 @@ private:
         static constexpr int FAST_SIZE = 1 << FAST_BITS;  // 1024
 
         struct Entry {
-            uint16_t val;      // literal symbol (0-255), EOB (256), or base length/distance
-            uint8_t  len;      // code length consumed (1-10 bits; 0 = invalid)
-            uint8_t  op_extra; // bit 7: is_match, bit 6: is_eob, bits 0-5: extra bits to read
+            uint16_t val;      // literal symbol (0-255), EOB (256), base length/dist, OR sub-table index
+            uint8_t  len;      // code length consumed (1-10 bits for fast, 1-5 for sub; 0 = invalid)
+            uint8_t  op_extra; // bit 7: is_match, bit 6: is_eob, bit 5: is_subtable, bits 0-4: extra bits
         };
 
         std::array<Entry, FAST_SIZE> fast;  // 4 KB — fits in L1 cache
+        std::vector<std::array<Entry, 32>> sub_tables;
+        bool is_valid = true;
 
-        struct SlowEntry {
-            uint16_t rev_code;
-            uint8_t  len;
-            uint8_t  op_extra;
-            uint16_t val;
-        };
-        std::vector<SlowEntry> slow;
-
-        DynTable() { fast.fill({ 0xFFFF, 0, 0 }); }
+        DynTable() {
+            fast.fill({ 0xFFFF, 0, 0 });
+            sub_tables.reserve(16);
+        }
     };
 
     static DynTable build_dyn_table(const std::vector<int>& lengths, int n, int mode = 0) {
         // mode 0: code lengths, mode 1: literals/lengths, mode 2: distances
         DynTable tbl;
 
-        std::array<int, 16> count{};
-        for (int i = 0; i < n; ++i) if (lengths[i]) count[lengths[i]]++;
+        if (n <= 0) return tbl;
 
+        // If literal/lengths mode (mode 1), EOB (symbol 256) MUST be present and have length > 0
+        if (mode == 1 && (n <= 256 || lengths.size() <= 256 || lengths[256] == 0)) {
+            tbl.is_valid = false;
+            return tbl;
+        }
+
+        std::array<int, 16> count{};
+        for (int i = 0; i < n && i < static_cast<int>(lengths.size()); ++i) {
+            if (lengths[i] > 15 || lengths[i] < 0) {
+                tbl.is_valid = false;
+                return tbl;
+            }
+            if (lengths[i]) count[lengths[i]]++;
+        }
+
+        // Kraft-McMillan / RFC 1951 oversubscription validation
         uint32_t code = 0;
         std::array<uint32_t, 16> next_code{};
         for (int bits = 1; bits <= 15; ++bits) {
             code = (code + count[bits - 1]) << 1;
+            if (code + count[bits] > (1u << bits)) {
+                tbl.is_valid = false; // Oversubscribed tree!
+                return tbl;
+            }
             next_code[bits] = code;
         }
 
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n && i < static_cast<int>(lengths.size()); ++i) {
             int clen = lengths[i];
             if (!clen) continue;
             uint32_t c     = next_code[clen]++;
@@ -900,13 +1019,13 @@ private:
                     int li = i - 257;
                     if (li < 29) {
                         val = static_cast<uint16_t>(LENCODES[li].base);
-                        op_extra = 0x80 | static_cast<uint8_t>(LENCODES[li].extra); // Match (bit 7)
+                        op_extra = 0x80 | static_cast<uint8_t>(LENCODES[li].extra & 0x1F); // Match (bit 7)
                     }
                 }
             } else {
                 if (i < 30) {
                     val = static_cast<uint16_t>(DISTCODES[i].base);
-                    op_extra = 0x80 | static_cast<uint8_t>(DISTCODES[i].extra); // Distance
+                    op_extra = 0x80 | static_cast<uint8_t>(DISTCODES[i].extra & 0x1F); // Distance (bit 7)
                 }
             }
 
@@ -917,12 +1036,25 @@ private:
                     tbl.fast[idx] = { val, static_cast<uint8_t>(clen), op_extra };
                 }
             } else {
-                tbl.slow.push_back({
-                    static_cast<uint16_t>(rev_c),
-                    static_cast<uint8_t>(clen),
-                    op_extra,
-                    val
-                });
+                // Secondary 32-entry sub-table (codes 11-15 bits: max 5 extra bits)
+                uint32_t fast_idx = rev_c & ((1u << DynTable::FAST_BITS) - 1);
+                uint16_t sub_idx;
+                if (tbl.fast[fast_idx].op_extra & 0x20) {
+                    sub_idx = tbl.fast[fast_idx].val;
+                } else {
+                    sub_idx = static_cast<uint16_t>(tbl.sub_tables.size());
+                    tbl.sub_tables.emplace_back();
+                    tbl.sub_tables.back().fill({ 0xFFFF, 0, 0 });
+                    tbl.fast[fast_idx] = { sub_idx, static_cast<uint8_t>(DynTable::FAST_BITS), 0x20 };
+                }
+
+                uint32_t rem_c   = rev_c >> DynTable::FAST_BITS;
+                int      rem_len = clen - DynTable::FAST_BITS;
+                int      fill_n  = 5 - rem_len;
+                for (int e = 0; e < (1 << fill_n); ++e) {
+                    uint32_t s_idx = rem_c | (static_cast<uint32_t>(e) << rem_len);
+                    tbl.sub_tables[sub_idx][s_idx] = { val, static_cast<uint8_t>(rem_len), op_extra };
+                }
             }
         }
         return tbl;
@@ -1137,24 +1269,28 @@ private:
                     cl_lengths[HCLEN_ORDER[i]] = static_cast<int>(read_bits(3));
 
                 auto cl_tbl = build_dyn_table(cl_lengths, 19, 0);
+                if (!cl_tbl.is_valid) return false;
 
                 auto decode_cl = [&]() -> int {
-                    if (__builtin_expect(bit_cnt < 10, 0)) refill();
+                    if (__builtin_expect(bit_cnt < 15, 0)) refill();
                     uint32_t fast_idx = bit_buf & 1023;
                     const auto& fe = cl_tbl.fast[fast_idx];
-                    if (fe.len > 0) {
+                    if (__builtin_expect((fe.op_extra & 0x20) == 0, 1)) {
+                        if (__builtin_expect(fe.len == 0 || bit_cnt < fe.len, 0)) return -1;
                         bit_buf >>= fe.len;
                         bit_cnt  -= fe.len;
                         return fe.val;
                     }
-                    for (const auto& se : cl_tbl.slow) {
-                        if ((bit_buf & ((1u << se.len) - 1)) == se.rev_code) {
-                            bit_buf >>= se.len;
-                            bit_cnt  -= se.len;
-                            return se.val;
-                        }
-                    }
-                    return -1;
+                    if (__builtin_expect(bit_cnt < 10, 0)) return -1;
+                    bit_buf >>= 10;
+                    bit_cnt  -= 10;
+                    if (__builtin_expect(fe.val >= cl_tbl.sub_tables.size(), 0)) return -1;
+                    uint32_t sub_idx = bit_buf & 31;
+                    const auto& se = cl_tbl.sub_tables[fe.val][sub_idx];
+                    if (__builtin_expect(se.len == 0 || bit_cnt < se.len, 0)) return -1;
+                    bit_buf >>= se.len;
+                    bit_cnt  -= se.len;
+                    return se.val;
                 };
 
                 std::vector<int> all_lens;
@@ -1187,24 +1323,28 @@ private:
 
                 auto ll_tbl   = build_dyn_table(ll_lens,   286, 1);
                 auto dist_tbl = build_dyn_table(dist_lens,  30, 2);
+                if (!ll_tbl.is_valid || !dist_tbl.is_valid) return false;
 
                 auto decode_fused = [&](const DynTable& tbl) -> DynTable::Entry {
                     if (__builtin_expect(bit_cnt < 15, 0)) refill();
                     uint32_t fast_idx = bit_buf & 1023;
                     const auto& fe = tbl.fast[fast_idx];
-                    if (__builtin_expect(fe.len > 0, 1)) {
+                    if (__builtin_expect((fe.op_extra & 0x20) == 0, 1)) {
+                        if (__builtin_expect(fe.len == 0 || bit_cnt < fe.len, 0)) return { 0xFFFF, 0, 0xFF };
                         bit_buf >>= fe.len;
                         bit_cnt  -= fe.len;
                         return fe;
                     }
-                    for (const auto& se : tbl.slow) {
-                        if ((bit_buf & ((1u << se.len) - 1)) == se.rev_code) {
-                            bit_buf >>= se.len;
-                            bit_cnt  -= se.len;
-                            return { se.val, se.len, se.op_extra };
-                        }
-                    }
-                    return { 0xFFFF, 0, 0xFF };
+                    if (__builtin_expect(bit_cnt < 10, 0)) return { 0xFFFF, 0, 0xFF };
+                    bit_buf >>= 10;
+                    bit_cnt  -= 10;
+                    if (__builtin_expect(fe.val >= tbl.sub_tables.size(), 0)) return { 0xFFFF, 0, 0xFF };
+                    uint32_t sub_idx = bit_buf & 31;
+                    const auto& se = tbl.sub_tables[fe.val][sub_idx];
+                    if (__builtin_expect(se.len == 0 || bit_cnt < se.len, 0)) return { 0xFFFF, 0, 0xFF };
+                    bit_buf >>= se.len;
+                    bit_cnt  -= se.len;
+                    return se;
                 };
 
                 while (true) {
@@ -1337,11 +1477,11 @@ public:
  *   Header:   0x78 0x9C  (CM=deflate, CINFO=7 window=32768; 0x789C % 31 == 0)
  *   Trailer:  Adler-32 of original data (big-endian, 4 bytes)
  */
-inline std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len) {
+inline std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len, int level) {
     // Always produce a valid DEFLATE stream (includes EOB even for empty input)
     auto deflated = (len == 0)
-        ? DeflateCompressor::compress_block(nullptr, 0, /*is_final=*/true)
-        : ParallelDeflateCompressor::compress_parallel(data, len);
+        ? DeflateCompressor::compress_block(nullptr, 0, /*is_final=*/true, level)
+        : ParallelDeflateCompressor::compress_parallel(data, len, level);
 
     std::vector<uint8_t> out;
     out.reserve(deflated.size() + 6);
@@ -1361,6 +1501,10 @@ inline std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len) {
     out.push_back(static_cast<uint8_t>( adler         & 0xFF));
 
     return out;
+}
+
+inline std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len) {
+    return compress_zlib(data, len, 6);
 }
 
 /**
@@ -1473,7 +1617,7 @@ inline std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len) {
  * @param fname  Optional filename to embed in header (null or empty = no FNAME)
  */
 inline std::vector<uint8_t> compress_gzip(const uint8_t* data, size_t len,
-                                           const char* fname = nullptr) {
+                                           const char* fname, int level) {
     // Decide flags
     const bool   has_fname  = (fname != nullptr && fname[0] != '\0');
     const uint8_t flg       = has_fname ? 0x08u : 0x00u;   // FNAME bit
@@ -1502,8 +1646,8 @@ inline std::vector<uint8_t> compress_gzip(const uint8_t* data, size_t len,
 
     // ── Raw DEFLATE payload (no zlib CMF/FLG or Adler-32) ───────────────────
     auto deflated = (len == 0)
-        ? DeflateCompressor::compress_block(nullptr, 0, /*is_final=*/true)
-        : ParallelDeflateCompressor::compress_parallel(data, len);
+        ? DeflateCompressor::compress_block(nullptr, 0, /*is_final=*/true, level)
+        : ParallelDeflateCompressor::compress_parallel(data, len, level);
     out.insert(out.end(), deflated.begin(), deflated.end());
 
     // ── CRC32 trailer (little-endian) ────────────────────────────────────────
@@ -1522,6 +1666,11 @@ inline std::vector<uint8_t> compress_gzip(const uint8_t* data, size_t len,
     out.push_back(static_cast<uint8_t>((isize >> 24) & 0xFF));
 
     return out;
+}
+
+inline std::vector<uint8_t> compress_gzip(const uint8_t* data, size_t len,
+                                           const char* fname = nullptr) {
+    return compress_gzip(data, len, fname, 6);
 }
 
 /**

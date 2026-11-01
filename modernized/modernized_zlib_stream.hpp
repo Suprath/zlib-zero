@@ -26,6 +26,7 @@ namespace ModernizedZlib {
     class InflateDecompressor;
 
     std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len);
+    std::vector<uint8_t> compress_zlib(const uint8_t* data, size_t len, int level);
     std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t len);
 
     enum class ZlibStatus {

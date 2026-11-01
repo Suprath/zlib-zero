@@ -146,8 +146,15 @@ ZLIB_EXPORT int deflateInit_(z_streamp strm, int level,
                               const char* /*version*/, int /*stream_size*/) {
     if (!strm) return Z_STREAM_ERROR;
 
-    auto* st = new (std::nothrow) StreamingDeflateState();
-    if (!st) return -4; // Z_MEM_ERROR
+    StreamingDeflateState* st = nullptr;
+    if (strm->zalloc) {
+        void* ptr = strm->zalloc(strm->opaque, 1, sizeof(StreamingDeflateState));
+        if (!ptr) return -4; // Z_MEM_ERROR
+        st = new (ptr) StreamingDeflateState();
+    } else {
+        st = new (std::nothrow) StreamingDeflateState();
+        if (!st) return -4; // Z_MEM_ERROR
+    }
 
     st->level    = (level < 1 || level > 9) ? 6 : level;
     strm->state  = st;
@@ -254,8 +261,30 @@ ZLIB_EXPORT int deflate(z_streamp strm, int flush) {
 
 ZLIB_EXPORT int deflateEnd(z_streamp strm) {
     if (!strm || !strm->state) return Z_STREAM_ERROR;
-    delete static_cast<StreamingDeflateState*>(strm->state);
+    auto* st = static_cast<StreamingDeflateState*>(strm->state);
+    if (strm->zfree) {
+        st->~StreamingDeflateState();
+        strm->zfree(strm->opaque, st);
+    } else {
+        delete st;
+    }
     strm->state = nullptr;
+    return Z_OK;
+}
+
+ZLIB_EXPORT int deflateReset(z_streamp strm) {
+    if (!strm || !strm->state) return Z_STREAM_ERROR;
+    auto* st = static_cast<StreamingDeflateState*>(strm->state);
+    st->in_buf.clear();
+    st->out_buf.clear();
+    st->out_pos = 0;
+    st->adler   = 1;
+    st->header_emitted = false;
+    st->finished       = false;
+    strm->total_in  = 0;
+    strm->total_out = 0;
+    strm->adler     = 1;
+    strm->msg       = nullptr;
     return Z_OK;
 }
 
@@ -267,8 +296,15 @@ ZLIB_EXPORT int inflateInit_(z_streamp strm,
                               const char* /*version*/, int /*stream_size*/) {
     if (!strm) return Z_STREAM_ERROR;
 
-    auto* st = new (std::nothrow) InflateState();
-    if (!st) return -4;
+    InflateState* st = nullptr;
+    if (strm->zalloc) {
+        void* ptr = strm->zalloc(strm->opaque, 1, sizeof(InflateState));
+        if (!ptr) return -4; // Z_MEM_ERROR
+        st = new (ptr) InflateState();
+    } else {
+        st = new (std::nothrow) InflateState();
+        if (!st) return -4; // Z_MEM_ERROR
+    }
 
     strm->state     = st;
     strm->total_in  = 0;
@@ -335,9 +371,75 @@ ZLIB_EXPORT int inflate(z_streamp strm, int flush) {
 
 ZLIB_EXPORT int inflateEnd(z_streamp strm) {
     if (!strm || !strm->state) return Z_STREAM_ERROR;
-    delete static_cast<InflateState*>(strm->state);
+    auto* st = static_cast<InflateState*>(strm->state);
+    if (strm->zfree) {
+        st->~InflateState();
+        strm->zfree(strm->opaque, st);
+    } else {
+        delete st;
+    }
     strm->state = nullptr;
     return Z_OK;
+}
+
+ZLIB_EXPORT int inflateReset(z_streamp strm) {
+    if (!strm || !strm->state) return Z_STREAM_ERROR;
+    auto* st = static_cast<InflateState*>(strm->state);
+    st->input_buf.clear();
+    st->output_buf.clear();
+    st->out_pos  = 0;
+    st->finished = false;
+    strm->total_in  = 0;
+    strm->total_out = 0;
+    strm->adler     = 1;
+    strm->msg       = nullptr;
+    return Z_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Single-Call Utilities (Standard zlib API)
+// ---------------------------------------------------------------------------
+
+ZLIB_EXPORT int compress2(uint8_t* dest, unsigned long* destLen,
+                          const uint8_t* source, unsigned long sourceLen,
+                          int level) {
+    if (!dest || !destLen || (!source && sourceLen > 0)) return Z_STREAM_ERROR;
+    auto out = ModernizedZlib::compress_zlib(source, sourceLen, level);
+    if (out.size() > *destLen) {
+        return Z_BUF_ERROR;
+    }
+    std::memcpy(dest, out.data(), out.size());
+    *destLen = static_cast<unsigned long>(out.size());
+    return Z_OK;
+}
+
+ZLIB_EXPORT int compress(uint8_t* dest, unsigned long* destLen,
+                         const uint8_t* source, unsigned long sourceLen) {
+    return compress2(dest, destLen, source, sourceLen, 6);
+}
+
+ZLIB_EXPORT int uncompress2(uint8_t* dest, unsigned long* destLen,
+                            const uint8_t* source, unsigned long* sourceLen) {
+    if (!dest || !destLen || !source || !sourceLen) return Z_STREAM_ERROR;
+    if (*sourceLen < 6) return -3; // Z_DATA_ERROR
+
+    size_t written = ModernizedZlib::decompress_zlib_into(dest, *destLen, source, *sourceLen);
+    if (written == 0) {
+        auto res = ModernizedZlib::decompress_zlib(source, *sourceLen);
+        if (res.empty()) return -3; // Z_DATA_ERROR
+        if (res.size() > *destLen) return Z_BUF_ERROR;
+        std::memcpy(dest, res.data(), res.size());
+        *destLen = static_cast<unsigned long>(res.size());
+        return Z_OK;
+    }
+    *destLen = static_cast<unsigned long>(written);
+    return Z_OK;
+}
+
+ZLIB_EXPORT int uncompress(uint8_t* dest, unsigned long* destLen,
+                           const uint8_t* source, unsigned long sourceLen) {
+    unsigned long src_len = sourceLen;
+    return uncompress2(dest, destLen, source, &src_len);
 }
 
 } // extern "C"
