@@ -1,12 +1,19 @@
-# zlib-zero (v1.1.1)
+# zlib-zero (v1.1.2)
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![Lean 4 Verified](https://img.shields.io/badge/Lean_4-Formally_Verified-darkgreen.svg)](https://lean-lang.org/)
+[![Platform: Linux | macOS | Windows](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](https://github.com/Suprath/zlib-zero)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![RFC 1950/1951/1952](https://img.shields.io/badge/RFC-1950%20%7C%201951%20%7C%201952-purple.svg)](https://tools.ietf.org/html/rfc1951)
 
 **zlib-zero** is a next-generation, high-performance, formally verified C++20 drop-in replacement for standard `zlib` and `zlib-ng`.
+
+### What's New in v1.1.2
+- **Universal Drop-In Parity (`import zlib_zero as zlib`)**: Standard `zlib` symbol parity (`compress`, `decompress`, `adler32`, `crc32`, `error`, `MAX_WBITS`, `Z_BEST_SPEED`, etc.).
+- **Global 1-Line Monkey Patching (`zlib_zero.monkey_patch()`)**: Transparently replaces Python's standard `zlib` inside `sys.modules`, accelerating `requests`, `urllib3`, `boto3`, `pandas`, `fastapi`, and `gzip` with zero code modifications.
+- **Cross-Platform Native Wheels**: Native builds for Windows MSVC (x64), Linux (`manylinux` x86_64 / aarch64), and macOS (Apple Silicon M-series & Intel x86_64).
+- **Hardened Test Harness**: Dynamic mtime-sorted extension resolution and graceful Lean 4 toolchain skips on headless CI runners.
 
 Engineered for cloud microservices, high-throughput data streaming, storage engines, and embedded systems, `zlib-zero` combines:
 - **Mathematical guarantees**: Core algorithmic invariants (Kraft-McMillan inequality, Adler-32 associativity, CRC-32 GF(2) matrix composition, LZ77 invertible sliding windows) proven in **Lean 4** (0 `sorry`).
@@ -211,7 +218,7 @@ include(FetchContent)
 FetchContent_Declare(
     zlib_zero
     GIT_REPOSITORY https://github.com/Suprath/zlib-zero.git
-    GIT_TAG        v1.1.1
+    GIT_TAG        v1.1.2
 )
 FetchContent_MakeAvailable(zlib_zero)
 
@@ -247,11 +254,16 @@ Run the full test suite:
 python3 -m unittest discover -s tests -p "test_*.py"
 ```
 
+Run empirical system impact benchmarks:
+```bash
+python3 tests/system_impact_benchmark.py
+```
+
 ---
 
 ## Comparison Matrix
 
-| Dimension | Standard `zlib` (madler) | `zlib-ng` | `zlib-zero` (v1.1.1) |
+| Dimension | Standard `zlib` (madler) | `zlib-ng` | `zlib-zero` (v1.1.2) |
 | :--- | :--- | :--- | :--- |
 | **Language Standard** | C89 / C99 | C99 | **Modern C++20** |
 | **Mathematical Verification** | None | None | **Lean 4 Formal Proofs (0 sorry)** |

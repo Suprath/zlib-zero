@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-System Impact & Empirical Potential Benchmark for zlib-zero (v1.1.0)
+System Impact & Empirical Potential Benchmark for zlib-zero (v1.1.2)
 Measures throughput, latency distributions (p50/p95/p99), memory scaling,
 SIMD checksum performance, and malformed payload defense.
 """
