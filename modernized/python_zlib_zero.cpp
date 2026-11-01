@@ -110,13 +110,34 @@ static PyObject* py_crc32(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLong(val);
 }
 
+static PyObject* py_monkey_patch(PyObject* self, PyObject* Py_UNUSED(args)) {
+    PyObject* sys_mod = PyImport_ImportModule("sys");
+    if (!sys_mod) return NULL;
+    PyObject* modules_dict = PyObject_GetAttrString(sys_mod, "modules");
+    Py_DECREF(sys_mod);
+    if (!modules_dict) return NULL;
+
+    PyObject* zlib_zero_mod = PyImport_ImportModule("zlib_zero");
+    if (!zlib_zero_mod) {
+        Py_DECREF(modules_dict);
+        return NULL;
+    }
+    PyDict_SetItemString(modules_dict, "zlib", zlib_zero_mod);
+    Py_DECREF(zlib_zero_mod);
+    Py_DECREF(modules_dict);
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef ZlibZeroMethods[] = {
     {"compress_zlib", py_compress_zlib, METH_VARARGS, "Compress bytes using modernized C++20 zlib DEFLATE engine."},
     {"decompress_zlib", py_decompress_zlib, METH_VARARGS, "Decompress zlib bytes using modernized C++20 engine."},
+    {"compress", py_compress_zlib, METH_VARARGS, "Drop-in alias for zlib.compress."},
+    {"decompress", py_decompress_zlib, METH_VARARGS, "Drop-in alias for zlib.decompress."},
     {"compress_gzip", py_compress_gzip, METH_VARARGS, "Compress bytes into GZIP RFC 1952 format."},
     {"decompress_gzip", py_decompress_gzip, METH_VARARGS, "Decompress GZIP RFC 1952 bytes."},
     {"adler32", py_adler32, METH_VARARGS, "Compute Adler-32 checksum (SIMD-accelerated)."},
     {"crc32", py_crc32, METH_VARARGS, "Compute CRC-32 checksum (Hardware-accelerated)."},
+    {"monkey_patch", py_monkey_patch, METH_NOARGS, "Globally replace Python's standard zlib with zlib_zero in sys.modules."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -129,5 +150,25 @@ static struct PyModuleDef zlibzeromodule = {
 };
 
 PyMODINIT_FUNC PyInit_zlib_zero(void) {
-    return PyModule_Create(&zlibzeromodule);
+    PyObject* m = PyModule_Create(&zlibzeromodule);
+    if (!m) return NULL;
+
+    // Standard zlib constants for 100% drop-in compatibility
+    PyModule_AddIntConstant(m, "MAX_WBITS", 15);
+    PyModule_AddIntConstant(m, "DEFLATED", 8);
+    PyModule_AddIntConstant(m, "DEF_MEM_LEVEL", 8);
+    PyModule_AddIntConstant(m, "Z_NO_COMPRESSION", 0);
+    PyModule_AddIntConstant(m, "Z_BEST_SPEED", 1);
+    PyModule_AddIntConstant(m, "Z_BEST_COMPRESSION", 9);
+    PyModule_AddIntConstant(m, "Z_DEFAULT_COMPRESSION", -1);
+    PyModule_AddIntConstant(m, "Z_SYNC_FLUSH", 2);
+    PyModule_AddIntConstant(m, "Z_FULL_FLUSH", 3);
+    PyModule_AddIntConstant(m, "Z_FINISH", 4);
+
+    // Standard zlib.error exception
+    PyObject* zlib_error = PyErr_NewException("zlib_zero.error", NULL, NULL);
+    Py_XINCREF(zlib_error);
+    PyModule_AddObject(m, "error", zlib_error);
+
+    return m;
 }
