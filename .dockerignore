@@ -1,0 +1,14 @@
+build/
+build_cmake/
+build_roundtrip/
+*.so
+*.dylib
+*.dll
+*.pyd
+*.a
+__pycache__/
+*.pyc
+.git/
+wheelhouse/
+dist/
+*.egg-info/
