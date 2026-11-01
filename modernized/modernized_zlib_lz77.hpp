@@ -1,9 +1,25 @@
 #ifndef MODERNIZED_ZLIB_LZ77_HPP
 #define MODERNIZED_ZLIB_LZ77_HPP
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static inline unsigned int msvc_ctz32(unsigned int mask) {
+    unsigned long index = 0;
+    _BitScanForward(&index, mask);
+    return static_cast<unsigned int>(index);
+}
+#ifndef __builtin_ctz
+#define __builtin_ctz(x) msvc_ctz32(x)
+#endif
+#endif
 
 #if defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
@@ -83,6 +99,10 @@ inline size_t longest_match_fast(const uint8_t* __restrict str1,
         if (diff != 0) {
 #if defined(__GNUC__) || defined(__clang__)
             match_len += (__builtin_ctzll(diff) >> 3);
+#elif defined(_MSC_VER)
+            unsigned long index = 0;
+            _BitScanForward64(&index, diff);
+            match_len += (index >> 3);
 #else
             while (match_len < max_len && str1[match_len] == str2[match_len]) match_len++;
 #endif

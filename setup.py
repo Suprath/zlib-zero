@@ -7,7 +7,14 @@ extra_compile_args = ["-std=c++20", "-O3"]
 machine = platform.machine().lower()
 
 if sys.platform == "win32":
-    extra_compile_args = ["/std:c++20", "/O2"]
+    extra_compile_args = [
+        "/std:c++20",
+        "/O2",
+        "/EHsc",
+        "/utf-8",
+        "/DNOMINMAX",
+        "/D_CRT_SECURE_NO_WARNINGS",
+    ]
 elif sys.platform == "darwin":
     if "arm" in machine or "aarch64" in machine:
         extra_compile_args.extend(["-arch", "arm64"])

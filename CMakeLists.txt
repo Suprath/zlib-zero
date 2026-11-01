@@ -7,7 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Optimization & Architecture Flags
 if(MSVC)
-    add_compile_options(/O2)
+    add_compile_options(/O2 /EHsc /utf-8 /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS)
 else()
     add_compile_options(-O3)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm" AND NOT APPLE)

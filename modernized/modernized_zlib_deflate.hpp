@@ -21,6 +21,16 @@
 #ifndef MODERNIZED_ZLIB_DEFLATE_HPP
 #define MODERNIZED_ZLIB_DEFLATE_HPP
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#if defined(_MSC_VER) || (!defined(__GNUC__) && !defined(__clang__))
+  #ifndef __builtin_expect
+    #define __builtin_expect(expr, val) (expr)
+  #endif
+#endif
+
 #include "modernized_zlib_lz77.hpp"
 #include <vector>
 #include <array>
@@ -29,6 +39,8 @@
 #include <cstring>
 #include <algorithm>
 #include <future>
+#include <thread>
+#include <atomic>
 #include <queue>
 #include <functional>
 #include <utility>

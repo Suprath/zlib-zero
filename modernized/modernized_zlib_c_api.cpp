@@ -14,6 +14,10 @@
  * accumulated across calls; compression/decompression is triggered on Z_FINISH.
  */
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "modernized_zlib_deflate.hpp"
 #include "modernized_zlib_stream.hpp"
 #include <cstdint>
@@ -22,6 +26,7 @@
 #include <cstdlib>
 #include <vector>
 #include <new>
+#include <algorithm>
 
 // ---------------------------------------------------------------------------
 // Platform export macro
