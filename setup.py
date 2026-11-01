@@ -37,7 +37,7 @@ long_description = open(readme_path, encoding="utf-8").read() if os.path.exists(
 
 setup(
     name="zlib-zero",
-    version="1.0.11",
+    version="1.1.0",
     description="High-Performance Modernized C++20 zlib Compression Engine",
     long_description=long_description,
     long_description_content_type="text/markdown",
