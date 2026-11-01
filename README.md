@@ -1,4 +1,4 @@
-# zlib-zero (v1.1.0)
+# zlib-zero (v1.1.1)
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
@@ -131,25 +131,49 @@ Supports custom memory allocators (`zalloc` / `zfree`). Existing software can re
 pip install zlib-zero
 ```
 
-Quick Python example:
+#### A. 100% Drop-In Replacement (`import zlib_zero as zlib`)
+`zlib-zero` provides standard `zlib` API parity (`compress`, `decompress`, `adler32`, `crc32`, `error`, and constants):
+
 ```python
-import zlib_zero
+import zlib_zero as zlib
 
 data = b"Hello, zlib-zero high-performance compression!" * 1000
 
-# High-speed zlib (RFC 1950) compression & decompression
-compressed = zlib_zero.compress_zlib(data, level=6)
-decompressed = zlib_zero.decompress_zlib(compressed)
+# Standard zlib API
+compressed = zlib.compress(data, level=6)
+decompressed = zlib.decompress(compressed)
 assert decompressed == data
 
-# High-speed GZIP (RFC 1952) compression & decompression
-gz_data = zlib_zero.compress_gzip(data, filename="sample.txt")
-recovered = zlib_zero.decompress_gzip(gz_data)
-assert recovered == data
+# Hardware-accelerated checksums
+adler = zlib.adler32(data)
+crc = zlib.crc32(data)
 
-# SIMD Checksums
-adler = zlib_zero.adler32(data)
-crc = zlib_zero.crc32(data)
+# Standard constants & exceptions
+print(zlib.MAX_WBITS, zlib.Z_BEST_SPEED, zlib.error)
+```
+
+#### B. Global 1-Line Monkey-Patching
+Accelerate all third-party libraries across your entire Python process (`requests`, `urllib3`, `pandas`, `gzip`, `zipfile`) with zero code changes:
+
+```python
+import zlib_zero
+zlib_zero.monkey_patch()
+
+# Any subsequent `import zlib` or `import gzip` automatically runs on zlib-zero!
+import zlib
+import gzip
+import requests
+
+# Runs through zlib-zero's 3.8 GB/s C++20 engine transparently
+compressed = gzip.compress(data)
+```
+
+#### C. High-Performance Zero-Copy API
+For database analytical engines and high-throughput pipelines, bypass intermediate memory allocations by passing buffer hints:
+
+```python
+# Direct zero-copy into pre-allocated memory (20.9 GB/s throughput)
+decompressed = zlib_zero.decompress_zlib(compressed, max_out=len(data))
 ```
 
 ### Option 2: C++20 Header-Only Integration
@@ -187,7 +211,7 @@ include(FetchContent)
 FetchContent_Declare(
     zlib_zero
     GIT_REPOSITORY https://github.com/Suprath/zlib-zero.git
-    GIT_TAG        v1.1.0
+    GIT_TAG        v1.1.1
 )
 FetchContent_MakeAvailable(zlib_zero)
 
@@ -227,7 +251,7 @@ python3 -m unittest discover -s tests -p "test_*.py"
 
 ## Comparison Matrix
 
-| Dimension | Standard `zlib` (madler) | `zlib-ng` | `zlib-zero` (v1.1.0) |
+| Dimension | Standard `zlib` (madler) | `zlib-ng` | `zlib-zero` (v1.1.1) |
 | :--- | :--- | :--- | :--- |
 | **Language Standard** | C89 / C99 | C99 | **Modern C++20** |
 | **Mathematical Verification** | None | None | **Lean 4 Formal Proofs (0 sorry)** |
